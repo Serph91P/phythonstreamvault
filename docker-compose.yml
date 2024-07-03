@@ -1,0 +1,42 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_ERLANG_COOKIE: "SECURE_COOKIE_HERE"
+      RABBITMQ_DEFAULT_USER: "user"
+      RABBITMQ_DEFAULT_PASS: "password"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  web:
+    build: .
+    command: >
+      sh -c "flask db upgrade &&
+             flask run --host=0.0.0.0"
+    ports:
+      - "5000:5000"
+    depends_on:
+      - rabbitmq
+    environment:
+      FLASK_APP: "app.py"
+      FLASK_ENV: "production"
+      CELERY_BROKER_URL: "amqp://user:password@rabbitmq:5672/"
+    volumes:
+      - .:/usr/src/app
+
+  worker:
+    build: .
+    command: celery -A app.celery worker --loglevel=info
+    depends_on:
+      - web
+      - rabbitmq
+    environment:
+      CELERY_BROKER_URL: "amqp://user:password@rabbitmq:5672/"
+    volumes:
+      - .:/usr/src/app
+
+volumes:
+  rabbitmq_data:

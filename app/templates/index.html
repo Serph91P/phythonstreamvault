@@ -1,0 +1,10 @@
+{% extends "layout.html" %}
+{% block title %}Home{% endblock %}
+{% block content %}
+    <div class="jumbotron mt-4">
+        <h1 class="display-4">Welcome to Twitch Recorder!</h1>
+        <p class="lead">Automatically record Twitch streams when your favorite streamers go live.</p>
+        <hr class="my-4">
+        <p>To get started, please <a href="{{ url_for('auth.register') }}">register</a> or <a href="{{ url_for('auth.login') }}">login</a>.</p>
+    </div>
+{% endblock %}
