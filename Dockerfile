@@ -22,4 +22,5 @@ RUN useradd -m myuser
 RUN chown -R myuser:myuser /usr/src/app
 USER myuser
 
-CMD ["gunicorn", "-b", "0.0.0.0:5000", "app:app"]
+# Gunicorn als WSGI-Server verwenden
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]

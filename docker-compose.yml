@@ -12,7 +12,6 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
-    command: gunicorn -b 0.0.0.0:5000 app:app
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
