@@ -1,42 +1,51 @@
 services:
-  rabbitmq:
-    image: rabbitmq:3-management
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-    environment:
-      RABBITMQ_ERLANG_COOKIE: "SECURE_COOKIE_HERE"
-      RABBITMQ_DEFAULT_USER: "user"
-      RABBITMQ_DEFAULT_PASS: "password"
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-
   web:
     build: .
-    command: >
-      sh -c "flask db upgrade &&
-             flask run --host=0.0.0.0"
-    ports:
-      - "5000:5000"
-    depends_on:
-      - rabbitmq
-    environment:
-      FLASK_APP: "app.py"
-      FLASK_ENV: "production"
-      CELERY_BROKER_URL: "amqp://user:password@rabbitmq:5672/"
     volumes:
       - .:/usr/src/app
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_APP=app.py
+      - FLASK_ENV=development
+      - CELERY_BROKER_URL=amqp://user:password@rabbitmq:5672
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: gunicorn -b 0.0.0.0:5000 app:app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   worker:
     build: .
     command: celery -A app.celery worker --loglevel=info
-    depends_on:
-      - web
-      - rabbitmq
     environment:
-      CELERY_BROKER_URL: "amqp://user:password@rabbitmq:5672/"
-    volumes:
-      - .:/usr/src/app
+      - CELERY_BROKER_URL=amqp://user:password@rabbitmq:5672
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.celery", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-volumes:
-  rabbitmq_data:
+  rabbitmq:
+    image: rabbitmq:3-management
+    environment:
+      - RABBITMQ_ERLANG_COOKIE=SECUREERLANGCOOKIE
+      - RABBITMQ_DEFAULT_USER=user
+      - RABBITMQ_DEFAULT_PASS=password
+    ports:
+      - "15672:15672"
+      - "5672:5672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
