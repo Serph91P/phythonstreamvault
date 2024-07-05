@@ -3,12 +3,16 @@ services:
     build: .
     volumes:
       - .:/usr/src/app
+      - recordings:/recordings
     ports:
       - "5000:5000"
     environment:
+      - BASE_URL=https://your-domain.com
       - FLASK_APP=app.py
       - FLASK_ENV=development
-      - CELERY_BROKER_URL=amqp://user:password@rabbitmq:5672
+      - RECORDINGS_DIR=/recordings/
+      - TWITCH_CLIENT_ID=fx4xg7kx7fwksmm7qxgi3cux496lp3
+      - TWITCH_CLIENT_SECRET=6cjpoghuodvlm1jaj5m9hy2y9d626b
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -21,30 +25,35 @@ services:
   worker:
     build: .
     command: celery -A app.celery worker --loglevel=info
+    volumes:
+      - .:/usr/src/app
+      - ./instance:/usr/src/app/instance
+      - recordings:/recordings
     environment:
-      - CELERY_BROKER_URL=amqp://user:password@rabbitmq:5672
+      - RECORDINGS_DIR=/recordings/
+      - TWITCH_CLIENT_ID=fx4xg7kx7fwksmm7qxgi3cux496lp3
+      - TWITCH_CLIENT_SECRET=6cjpoghuodvlm1jaj5m9hy2y9d626b
+      - CELERY_BROKER_URL=amqp://user:password@rabbitmq:5672/
+      - CELERY_RESULT_BACKEND=rpc://
     depends_on:
       rabbitmq:
         condition: service_healthy
       web:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "celery", "-A", "app.celery", "inspect", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+        condition: service_started
 
   rabbitmq:
     image: rabbitmq:3-management
     environment:
-      - RABBITMQ_ERLANG_COOKIE=SECUREERLANGCOOKIE
       - RABBITMQ_DEFAULT_USER=user
       - RABBITMQ_DEFAULT_PASS=password
     ports:
-      - "15672:15672"
       - "5672:5672"
+      - "15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
       interval: 30s
       timeout: 10s
       retries: 5
+
+volumes:
+  recordings:
