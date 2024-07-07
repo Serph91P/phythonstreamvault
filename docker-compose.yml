@@ -33,8 +33,8 @@ services:
       - recordings:/recordings
     environment:
       - RECORDINGS_DIR=/recordings/
-      - TWITCH_CLIENT_ID=fx4xg7kx7fwksmm7qxgi3cux496lp3
-      - TWITCH_CLIENT_SECRET=6cjpoghuodvlm1jaj5m9hy2y9d626b
+      - TWITCH_CLIENT_ID=
+      - TWITCH_CLIENT_SECRET=
       - CELERY_BROKER_URL=amqp://user:password@rabbitmq:5672/
       - CELERY_RESULT_BACKEND=rpc://
     depends_on:
