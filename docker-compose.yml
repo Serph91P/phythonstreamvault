@@ -12,9 +12,9 @@ services:
       - FLASK_APP=app.py
       - FLASK_ENV=development
       - RECORDINGS_DIR=/recordings/
-      - TWITCH_CLIENT_ID=fx4xg7kx7fwksmm7qxgi3cux496lp3
-      - TWITCH_CLIENT_SECRET=6cjpoghuodvlm1jaj5m9hy2y9d626b
-      - TWITCH_WEBHOOK_SECRET=ogDEi3@#CQ5L3xFu7qGNq#!9UPdzwrGD
+      - TWITCH_CLIENT_ID=
+      - TWITCH_CLIENT_SECRET=
+      - TWITCH_WEBHOOK_SECRET=
     depends_on:
       rabbitmq:
         condition: service_healthy
