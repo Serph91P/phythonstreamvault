@@ -1,9 +1,5 @@
 import subprocess
-from app.celery import init_celery
-from app import create_app
-
-app = create_app()
-celery = init_celery(app)
+from app.celery import celery 
 
 @celery.task
 def start_recording_task(streamer_id):

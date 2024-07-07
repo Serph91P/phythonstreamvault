@@ -1,18 +1,26 @@
 {% extends "layout.html" %}
-{% block title %}Dashboard{% endblock %}
 {% block content %}
-    <h2 class="mt-4">Dashboard</h2>
-    <form method="POST" action="{{ url_for('main.add_streamer') }}">
-        <div class="form-group">
-            <label for="username">Streamer Username</label>
-            <input type="text" name="username" class="form-control" id="username" placeholder="Enter Streamer Username" required>
-        </div>
-        <button type="submit" class="btn btn-primary">Add Streamer</button>
-    </form>
-    <h3 class="mt-4">Your Streamers</h3>
-    <ul class="list-group">
-        {% for streamer in streamers %}
-            <li class="list-group-item">{{ streamer.username }}</li>
-        {% endfor %}
-    </ul>
+<h1>Dashboard</h1>
+<form method="POST" action="{{ url_for('main.add_streamer') }}">
+    <input type="text" name="username" placeholder="Streamer Username">
+    <button type="submit">Add Streamer</button>
+</form>
+<ul>
+{% for streamer in streamers %}
+    <li>
+        {{ streamer.username }} 
+        {% if streamer.is_live %}
+            <span style="color: green;">Online</span>
+        {% else %}
+            <span style="color: red;">Offline</span>
+        {% endif %}
+        {% if streamer.stream_title %}
+            - {{ streamer.stream_title }}
+        {% endif %}
+        {% if streamer.game_name %}
+            ({{ streamer.game_name }})
+        {% endif %}
+    </li>
+{% endfor %}
+</ul>
 {% endblock %}

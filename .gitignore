@@ -1,1 +1,8 @@
 /recordings
+/__pycache__
+/app/__pycache__
+/migrations
+/instance
+app/__pycache__/__init__.cpython-39.pyc
+app/__pycache__/auth.cpython-39.pyc
+app/__pycache__/forms.cpython-39.pyc

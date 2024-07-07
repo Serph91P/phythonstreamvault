@@ -8,3 +8,5 @@ celery
 gunicorn
 streamlink
 Werkzeug
+email_validator
+twitchAPI
