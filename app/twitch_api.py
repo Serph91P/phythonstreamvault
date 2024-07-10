@@ -4,8 +4,6 @@ import traceback
 from flask import current_app
 from twitchAPI.twitch import Twitch
 from twitchAPI.eventsub.webhook import EventSubWebhook
-from twitchAPI.oauth import UserAuthenticator
-from twitchAPI.object.eventsub import ChannelUpdateEvent, StreamOfflineEvent, StreamOnlineEvent
 from twitchAPI.helper import first
 from app import celery
 
@@ -27,31 +25,29 @@ async def setup_twitch(app):
         app.logger.error(traceback.format_exc())
         return None
 
-def start_eventsub_in_thread(app, twitch_instance):
-    async def setup_and_start_eventsub():
-        global eventsub
-        try:
-            app.logger.info(f"Initializing EventSubWebhook with CALLBACK_URL: {app.config['CALLBACK_URL']}")
-            eventsub = EventSubWebhook(
-                app.config['CALLBACK_URL'],
-                app.config['EVENTSUB_WEBHOOK_PORT'],
-                twitch_instance,
-                ssl_context=None,
-                host_binding='0.0.0.0',
-                subscription_url=None,
-                callback_loop=None,
-                revocation_handler=None,
-                message_deduplication_history_length=50
-            )
-            await eventsub.start()
-            app.logger.info("EventSubWebhook started successfully")
-        except Exception as e:
-            app.logger.error(f"Failed to initialize or start EventSub: {str(e)}")
-            app.logger.error(traceback.format_exc())
-            eventsub = None
+async def setup_and_start_eventsub(app, twitch_instance):
+    global eventsub
+    try:
+        app.logger.info(f"Initializing EventSubWebhook with CALLBACK_URL: {app.config['CALLBACK_URL']}")
+        eventsub = EventSubWebhook(
+            app.config['CALLBACK_URL'],
+            app.config['EVENTSUB_WEBHOOK_PORT'],
+            twitch_instance,
+            ssl_context=None,  # Using reverse proxy for SSL
+            host_binding='0.0.0.0'
+        )
+        app.logger.info(f"EventSubWebhook instance created: {eventsub}")
+        await eventsub.start()
+        app.logger.info("EventSubWebhook started successfully")
+    except Exception as e:
+        app.logger.error(f"Failed to initialize or start EventSub: {str(e)}")
+        app.logger.error(traceback.format_exc())
+        eventsub = None
 
-    thread = threading.Thread(target=asyncio.run, args=(setup_and_start_eventsub(),))
-    thread.start()
+def start_eventsub_in_thread(app, twitch_instance):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(setup_and_start_eventsub(app, twitch_instance))
 
 async def ensure_twitch_initialized(app):
     global twitch, eventsub
@@ -64,7 +60,8 @@ async def ensure_twitch_initialized(app):
     with eventsub_init_lock:
         if eventsub is None:
             app.logger.info("Starting EventSub initialization...")
-            start_eventsub_in_thread(app, twitch)
+            thread = threading.Thread(target=start_eventsub_in_thread, args=(app, twitch))
+            thread.start()
             for i in range(30):  # Wait up to 30 seconds
                 if eventsub is not None:
                     app.logger.info(f"EventSub initialized after {i} seconds")

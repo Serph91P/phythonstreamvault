@@ -36,14 +36,19 @@ def create_app():
     
     app.logger.info("Starting application...")
 
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
+
     db.init_app(app)
     bcrypt.init_app(app)
     login_manager.init_app(app)
-
-    
+    migrate.init_app(app, db)  # Initialize Flask-Migrate here
 
     if not os.path.exists(os.path.join(app.config['BASE_DIR'], 'migrations')):
-        migrate.init_app(app, db)
+        with app.app_context():
+            db.create_all()
+            # Initialize migrations if not present
+            from flask_migrate import init as migrate_init
+            migrate_init()
     else:
         app.logger.info("Migrations directory already exists")
 
@@ -52,9 +57,6 @@ def create_app():
 
     from app.main import main as main_blueprint
     app.register_blueprint(main_blueprint)
-
-    with app.app_context():
-        db.create_all()
 
     from app.twitch_api import ensure_twitch_initialized
     with app.app_context():
