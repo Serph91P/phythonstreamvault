@@ -1,4 +1,16 @@
 services:
+  nginx:
+    image: nginx:latest
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf.template:/etc/nginx/templates/nginx.conf.template
+    environment:
+      - BASE_URL=
+    entrypoint: /bin/sh -c "envsubst < /etc/nginx/templates/nginx.conf.template > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'"
+    depends_on:
+      - web
+
   web:
     build: 
       context: .
@@ -7,17 +19,17 @@ services:
       - .:/usr/src/app
       - recordings:/recordings
     ports:
-      - "5000:5000"
-      - "8080:8080"
+      - "5000"
+      - "8080"
     environment:
-      - BASE_URL=https://streamvault.mebert-server.de
+      - BASE_URL=
       # - FLASK_APP=app.py
       - FLASK_APP=app/__init__.py
       - FLASK_ENV=development
       - RECORDINGS_DIR=/recordings/
-      - TWITCH_CLIENT_ID=fx4xg7kx7fwksmm7qxgi3cux496lp3
-      - TWITCH_CLIENT_SECRET=6cjpoghuodvlm1jaj5m9hy2y9d626b
-      - TWITCH_WEBHOOK_SECRET=ogDEi3@#CQ5L3xFu7qGNq#!9UPdzwrGD
+      - TWITCH_CLIENT_ID=
+      - TWITCH_CLIENT_SECRET=
+      - TWITCH_WEBHOOK_SECRET=
       - CELERY_BROKER_URL=amqp://user:password@rabbitmq:5672/
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - EVENTSUB_WEBHOOK_PORT=8080
@@ -42,11 +54,11 @@ services:
       - ./instance:/usr/src/app/instance
       - recordings:/recordings
     environment:
-      - BASE_URL=https://streamvault.mebert-server.de
+      - BASE_URL=
       - RECORDINGS_DIR=/recordings/
-      - TWITCH_CLIENT_ID=fx4xg7kx7fwksmm7qxgi3cux496lp3
-      - TWITCH_CLIENT_SECRET=6cjpoghuodvlm1jaj5m9hy2y9d626b
-      - TWITCH_WEBHOOK_SECRET=ogDEi3@#CQ5L3xFu7qGNq#!9UPdzwrGD
+      - TWITCH_CLIENT_ID=
+      - TWITCH_CLIENT_SECRET=
+      - TWITCH_WEBHOOK_SECRET=
       - CELERY_BROKER_URL=amqp://user:password@rabbitmq:5672/
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP=True
