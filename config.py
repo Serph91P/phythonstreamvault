@@ -21,4 +21,5 @@ class Config:
     # URL configurations
     BASE_URL = os.environ.get('BASE_URL')
     WEBHOOK_PATH = '/webhook/callback'
+    EVENTSUB_WEBHOOK_PORT = int(os.environ.get('EVENTSUB_WEBHOOK_PORT', 8080))
     CALLBACK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
