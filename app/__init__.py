@@ -1,5 +1,6 @@
 import threading
 import asyncio
+import traceback
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
@@ -29,7 +30,6 @@ def run_async(app, coro):
 def create_app():
     app = Flask(__name__)
     app.config.from_object('config.Config')
-
     db.init_app(app)
     bcrypt.init_app(app)
     login_manager.init_app(app)
@@ -45,11 +45,19 @@ def create_app():
 
     def setup_twitch_wrapper():
         if not hasattr(app, 'twitch_setup_done'):
-            thread = threading.Thread(target=run_async, args=(app, ensure_twitch_initialized(app)))
-            thread.start()
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(ensure_twitch_initialized(app))
+                app.logger.info("Twitch and EventSub initialization completed")
+            except Exception as e:
+                app.logger.error(f"Error in Twitch setup: {str(e)}")
+                app.logger.error(traceback.format_exc())
+            finally:
+                loop.close()
             app.twitch_setup_done = True
 
-    app.before_request(setup_twitch_wrapper)
+    app.before_first_request(setup_twitch_wrapper)
 
     return app
 

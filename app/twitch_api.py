@@ -13,13 +13,15 @@ eventsub = None
 
 SUBSCRIPTION_TIMEOUT = 120
 
+
 async def setup_twitch(app):
     global twitch
     try:
+        current_app.logger.info(f"Initializing Twitch API with CLIENT_ID: {app.config['TWITCH_CLIENT_ID']}")
         twitch = await Twitch(app.config['TWITCH_CLIENT_ID'], app.config['TWITCH_CLIENT_SECRET'])
         await twitch.authenticate_app([])
-        twitch.webhook_secret = app.config['TWITCH_WEBHOOK_SECRET']  # Add this line
-        current_app.logger.info("Twitch API initialized")
+        twitch.webhook_secret = app.config['TWITCH_WEBHOOK_SECRET']
+        current_app.logger.info("Twitch API initialized successfully")
         return twitch
     except Exception as e:
         current_app.logger.error(f"Failed to initialize Twitch API: {str(e)}")
@@ -29,31 +31,47 @@ async def setup_twitch(app):
 async def setup_eventsub(app, twitch_instance):
     global eventsub
     try:
+        current_app.logger.info(f"Initializing EventSubWebhook with CALLBACK_URL: {app.config['CALLBACK_URL']}")
+        current_app.logger.info(f"Twitch instance: {twitch_instance}")
         eventsub = EventSubWebhook(
             callback_url=app.config['CALLBACK_URL'],
             port=8080,
             twitch=twitch_instance
         )
+        current_app.logger.info(f"EventSubWebhook object created: {eventsub}")
+        
+        if eventsub is None:
+            current_app.logger.error("EventSubWebhook initialization failed: eventsub is None")
+            return None
+        
+        current_app.logger.info("Starting EventSubWebhook...")
         await eventsub.start()
-        current_app.logger.info(f"EventSub initialized with CALLBACK_URL: {app.config['CALLBACK_URL']}")
+        current_app.logger.info("EventSubWebhook started successfully")
         return eventsub
     except Exception as e:
-        current_app.logger.error(f"Failed to initialize EventSub: {str(e)}")
+        current_app.logger.error(f"Failed to initialize or start EventSub: {str(e)}")
         current_app.logger.error(traceback.format_exc())
         return None
 
 async def ensure_twitch_initialized(app):
     global twitch, eventsub
     if twitch is None:
+        current_app.logger.info("Twitch API not initialized. Initializing now...")
         twitch = await setup_twitch(app)
     if twitch is None:
         current_app.logger.error("Failed to initialize Twitch API")
         return None, None
+    
+    current_app.logger.info("Twitch API initialized successfully")
+    
     if eventsub is None:
+        current_app.logger.info("EventSub not initialized. Initializing now...")
         eventsub = await setup_eventsub(app, twitch)
     if eventsub is None:
         current_app.logger.error("Failed to initialize EventSub")
         return twitch, None
+    
+    current_app.logger.info("EventSub initialized successfully")
     return twitch, eventsub
 
 async def list_all_subscriptions():
