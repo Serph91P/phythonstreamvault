@@ -18,6 +18,7 @@ async def setup_twitch(app):
     try:
         twitch = await Twitch(app.config['TWITCH_CLIENT_ID'], app.config['TWITCH_CLIENT_SECRET'])
         await twitch.authenticate_app([])
+        twitch.webhook_secret = app.config['TWITCH_WEBHOOK_SECRET']  # Add this line
         current_app.logger.info("Twitch API initialized")
         return twitch
     except Exception as e:
@@ -31,8 +32,7 @@ async def setup_eventsub(app, twitch_instance):
         eventsub = EventSubWebhook(
             callback_url=app.config['CALLBACK_URL'],
             port=8080,
-            twitch=twitch_instance,
-            secret=app.config['TWITCH_WEBHOOK_SECRET']
+            twitch=twitch_instance
         )
         await eventsub.start()
         current_app.logger.info(f"EventSub initialized with CALLBACK_URL: {app.config['CALLBACK_URL']}")
