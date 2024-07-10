@@ -1,6 +1,6 @@
-import threading
 import asyncio
 import traceback
+import threading
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
@@ -15,48 +15,47 @@ login_manager.login_view = 'auth.login'
 login_manager.login_message = 'Please log in to access this page.'
 migrate = Migrate()
 
-def run_async(app, coro):
-    async def wrapper():
-        with app.app_context():
-            await coro
+def async_init(app):
+    async def init_twitch():
+        from app.twitch_api import ensure_twitch_initialized
+        await ensure_twitch_initialized(app)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(wrapper())
-    finally:
-        loop.close()
+    def run_async_init():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(init_twitch())
+
+    thread = threading.Thread(target=run_async_init)
+    thread.start()
 
 def create_app():
     app = Flask(__name__)
     app.config.from_object('config.Config')
-    db.init_app(app)
-    bcrypt.init_app(app)
-    login_manager.init_app(app)
-    migrate.init_app(app, db)
+    
+    # Set up logging
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    app.logger.info("Starting application...")
 
-    from app.auth import auth as auth_blueprint
-    app.register_blueprint(auth_blueprint, url_prefix='/auth')
+    try:
+        db.init_app(app)
+        bcrypt.init_app(app)
+        login_manager.init_app(app)
+        migrate.init_app(app, db)
 
-    from app.main import main as main_blueprint
-    app.register_blueprint(main_blueprint)
+        from app.auth import auth as auth_blueprint
+        app.register_blueprint(auth_blueprint, url_prefix='/auth')
 
-    from app.twitch_api import setup_twitch, setup_eventsub, ensure_twitch_initialized
+        from app.main import main as main_blueprint
+        app.register_blueprint(main_blueprint)
 
-    @app.before_request
-    def setup_twitch_wrapper():
-        if not hasattr(app, 'twitch_setup_done'):
-            def run_setup():
-                try:
-                    run_async(app, ensure_twitch_initialized(app))
-                    app.logger.info("Twitch and EventSub initialization completed")
-                except Exception as e:
-                    app.logger.error(f"Error in Twitch setup: {str(e)}")
-                    app.logger.error(traceback.format_exc())
+        # Start Twitch API initialization in the background
+        async_init(app)
 
-            thread = threading.Thread(target=run_setup)
-            thread.start()
-            app.twitch_setup_done = True
+        app.logger.info("Application initialized successfully")
+    except Exception as e:
+        app.logger.error(f"Error initializing application: {str(e)}")
+        app.logger.error(traceback.format_exc())
 
     return app
 

@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import traceback
 from flask import current_app
 from twitchAPI.twitch import Twitch
@@ -28,6 +29,9 @@ async def setup_twitch(app):
         current_app.logger.error(traceback.format_exc())
         return None
 
+def start_eventsub_in_thread(eventsub):
+    eventsub.start()
+
 async def setup_eventsub(app, twitch_instance):
     global eventsub
     try:
@@ -46,16 +50,17 @@ async def setup_eventsub(app, twitch_instance):
         
         current_app.logger.info("Starting EventSubWebhook...")
         try:
-            await eventsub.start()
+            # Start the EventSubWebhook in a separate thread
+            thread = threading.Thread(target=start_eventsub_in_thread, args=(eventsub,))
+            thread.start()
+            thread.join(timeout=10)  # Wait for up to 10 seconds
+            if thread.is_alive():
+                current_app.logger.error("EventSubWebhook start timed out")
+                return None
             current_app.logger.info("EventSubWebhook started successfully")
         except Exception as start_error:
-            current_app.logger.error(f"Failed to start EventSubWebhook: {str(start_error)}")
+            current_app.logger.error(f"Failed to start EventSubHook: {str(start_error)}")
             current_app.logger.error(traceback.format_exc())
-            # Try to get more information about the error
-            if hasattr(start_error, 'errno'):
-                current_app.logger.error(f"Error number: {start_error.errno}")
-            if hasattr(start_error, 'strerror'):
-                current_app.logger.error(f"Error string: {start_error.strerror}")
             return None
         return eventsub
     except Exception as e:
@@ -132,33 +137,22 @@ async def subscribe_to_events(streamer, app):
             
             current_app.logger.info(f"Subscribing to events for user {user.id}")
 
-            subscription_functions = [
-                (eventsub.listen_stream_online, "stream.online"),
-                (eventsub.listen_stream_offline, "stream.offline"),
-                (eventsub.listen_channel_update, "channel.update")
-            ]
-
-            for subscribe_func, event_type in subscription_functions:
-                max_attempts = 3
-                for attempt in range(max_attempts):
-                    try:
-                        current_app.logger.info(f"Attempting to subscribe to {event_type} event (Attempt {attempt + 1}/{max_attempts})")
-                        subscription = await asyncio.wait_for(subscribe_func(user.id, globals()[f"on_{event_type.replace('.', '_')}"]), timeout=SUBSCRIPTION_TIMEOUT)
-                        current_app.logger.info(f"Successfully subscribed to {event_type} event: {subscription.id}")
-                        break
-                    except asyncio.TimeoutError:
-                        current_app.logger.error(f"Timeout while subscribing to {event_type} event")
-                    except Exception as e:
-                        if "already subscribed" in str(e).lower():
-                            current_app.logger.warning(f"Subscription for {event_type} already exists. Attempting to delete and resubscribe.")
-                            await delete_all_subscriptions()
-                            continue
-                        else:
-                            current_app.logger.error(f"Failed to subscribe to {event_type} event: {str(e)}")
+            subscription_types = ["stream.online", "stream.offline", "channel.update"]
+            for event_type in subscription_types:
+                try:
+                    # Check if subscription already exists
+                    existing_subs = await twitch.get_eventsub_subscriptions()
+                    sub_exists = any(sub.type == event_type and sub.condition.get('broadcaster_user_id') == str(user.id) for sub in existing_subs.data)
                     
-                    if attempt == max_attempts - 1:
-                        current_app.logger.error(f"Failed to subscribe to {event_type} event after {max_attempts} attempts")
-                        return False
+                    if sub_exists:
+                        current_app.logger.info(f"Subscription for {event_type} already exists. Skipping.")
+                        continue
+
+                    # If not exists, create new subscription
+                    subscription = await getattr(eventsub, f"listen_{event_type.replace('.', '_')}")(user.id, globals()[f"on_{event_type.replace('.', '_')}"])
+                    current_app.logger.info(f"Successfully subscribed to {event_type} event: {subscription.id}")
+                except Exception as e:
+                    current_app.logger.error(f"Failed to subscribe to {event_type}: {str(e)}")
 
             return True
         else:
@@ -175,18 +169,16 @@ def add_streamer_task(username, user_id):
     
     app = create_app()
     
-    async def run_task():
-        twitch, eventsub = await ensure_twitch_initialized(app)
-        if twitch is None or eventsub is None:
-            return False
-        return await subscribe_to_events(username, app)
-    
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        result = loop.run_until_complete(run_task())
-    finally:
-        loop.close()
+    with app.app_context():
+        async def run_task():
+            return await subscribe_to_events(username, app)
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(run_task())
+        finally:
+            loop.close()
     
     return result
 
