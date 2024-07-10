@@ -1,6 +1,8 @@
 services:
   web:
-    build: .
+    build: 
+      context: .
+      dockerfile: Dockerfile
     volumes:
       - .:/usr/src/app
       - recordings:/recordings
@@ -8,16 +10,20 @@ services:
       - "5000:5000"
       - "8080:8080"
     environment:
-      - BASE_URL=https://twitch.mebert-server.de
+      - BASE_URL=https://streamvault.mebert-server.de
       - FLASK_APP=app.py
       - FLASK_ENV=development
       - RECORDINGS_DIR=/recordings/
-      - TWITCH_CLIENT_ID=
-      - TWITCH_CLIENT_SECRET=
-      - TWITCH_WEBHOOK_SECRET=
+      - TWITCH_CLIENT_ID=fx4xg7kx7fwksmm7qxgi3cux496lp3
+      - TWITCH_CLIENT_SECRET=6cjpoghuodvlm1jaj5m9hy2y9d626b
+      - TWITCH_WEBHOOK_SECRET=ogDEi3@#CQ5L3xFu7qGNq#!9UPdzwrGD
+      - CELERY_BROKER_URL=amqp://user:password@rabbitmq:5672/
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
       rabbitmq:
         condition: service_healthy
+      redis:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
@@ -25,37 +31,50 @@ services:
       retries: 3
 
   worker:
-    build: .
-    command: celery -A app.celery worker --loglevel=info
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A app.celery_worker.celery worker --loglevel=info
     volumes:
       - .:/usr/src/app
       - ./instance:/usr/src/app/instance
       - recordings:/recordings
     environment:
+      - BASE_URL=https://streamvault.mebert-server.de
       - RECORDINGS_DIR=/recordings/
-      - TWITCH_CLIENT_ID=
-      - TWITCH_CLIENT_SECRET=
+      - TWITCH_CLIENT_ID=fx4xg7kx7fwksmm7qxgi3cux496lp3
+      - TWITCH_CLIENT_SECRET=6cjpoghuodvlm1jaj5m9hy2y9d626b
       - CELERY_BROKER_URL=amqp://user:password@rabbitmq:5672/
-      - CELERY_RESULT_BACKEND=rpc://
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
       rabbitmq:
         condition: service_healthy
+      redis:
+        condition: service_started
       web:
         condition: service_started
 
   rabbitmq:
-    image: rabbitmq:3-management
+    image: rabbitmq:3-alpine
     environment:
       - RABBITMQ_DEFAULT_USER=user
       - RABBITMQ_DEFAULT_PASS=password
+      - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbit log_levels [{connection,error}]
     ports:
       - "5672:5672"
-      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
-      interval: 30s
-      timeout: 10s
+      interval: 10s
+      timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+
 volumes:
+  rabbitmq_data:
   recordings:

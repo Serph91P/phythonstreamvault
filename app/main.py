@@ -1,11 +1,12 @@
-from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, abort
+from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, abort, current_app
 from flask_login import login_required, current_user
 from app import db
 from app.models import Streamer, User
-from app.twitch_api import subscribe_to_events
+from app.twitch_api import add_streamer_task, list_all_subscriptions, delete_all_subscriptions, subscribe_to_events
 import hmac
 import hashlib
 import asyncio
+from celery import shared_task
 
 main = Blueprint('main', __name__)
 
@@ -13,6 +14,8 @@ main = Blueprint('main', __name__)
 def index():
     if not User.query.first():
         return redirect(url_for('auth.setup'))
+    if not current_user.is_authenticated:
+        return redirect(url_for('auth.login'))
     return render_template('index.html', title='Home')
 
 @main.route('/dashboard')
@@ -26,53 +29,170 @@ def dashboard():
 def add_streamer():
     username = request.form.get('username')
     if username:
-        from app.twitch_api import add_streamer as twitch_add_streamer
-        twitch_add_streamer(username, current_user.id)
-        flash('Streamer added successfully', 'success')
-    return redirect(url_for('main.dashboard'))
+        try:
+            task = add_streamer_task.delay(username, current_user.id)
+            return jsonify({'task_id': str(task.id), 'status': 'Adding streamer...'}), 202
+        except Exception as e:
+            current_app.logger.error(f"Error adding streamer: {str(e)}")
+            return jsonify({'error': 'An error occurred. Please try again later.'}), 500
+    return jsonify({'error': 'No username provided'}), 400
 
-@main.route('/webhook', methods=['POST'])
-def twitch_webhook():
-    # Überprüfen der Twitch-Signatur
+@main.route('/task_status/<task_id>')
+@login_required
+def task_status(task_id):
+    task = add_streamer_task.AsyncResult(task_id)
+    if task.state == 'PENDING':
+        response = {
+            'state': task.state,
+            'status': 'Adding streamer...'
+        }
+    elif task.state == 'SUCCESS':
+        response = {
+            'state': task.state,
+            'result': task.result
+        }
+    else:
+        response = {
+            'state': task.state,
+            'status': str(task.info)
+        }
+    return jsonify(response)
+
+@main.route('/delete_streamer/<int:streamer_id>', methods=['POST'])
+@login_required
+def delete_streamer(streamer_id):
+    streamer = Streamer.query.get_or_404(streamer_id)
+    if streamer.user_id != current_user.id:
+        abort(403)
+    
+    db.session.delete(streamer)
+    db.session.commit()
+    return jsonify({'status': 'success', 'message': 'Streamer has been deleted'})
+
+@main.route('/webhook/callback', methods=['POST'])
+def twitch_webhook_callback():
+    # Verify Twitch signature
     twitch_signature = request.headers.get('Twitch-Eventsub-Message-Signature')
+    message_id = request.headers.get('Twitch-Eventsub-Message-Id')
+    timestamp = request.headers.get('Twitch-Eventsub-Message-Timestamp')
+    message = message_id + timestamp + request.data.decode('utf-8')
+    
     if not twitch_signature:
-        abort(400, description="Twitch-Eventsub-Message-Signature header is missing")
-
-    message = request.headers.get('Twitch-Eventsub-Message-Id', '') + \
-              request.headers.get('Twitch-Eventsub-Message-Timestamp', '') + \
-              request.data.decode('utf-8')
-
-    from flask import current_app
-    secret = current_app.config['TWITCH_WEBHOOK_SECRET'].encode('utf-8')
-    expected_signature = 'sha256=' + hmac.new(secret, message.encode('utf-8'), hashlib.sha256).hexdigest()
-
+        current_app.logger.error("Twitch-Eventsub-Message-Signature header is missing")
+        abort(400)
+    
+    expected_signature = 'sha256=' + hmac.new(
+        current_app.config['TWITCH_WEBHOOK_SECRET'].encode('utf-8'),
+        message.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+    
     if not hmac.compare_digest(twitch_signature, expected_signature):
-        abort(403, description="Invalid signature")
-
-    # Verarbeiten des Ereignisses
+        current_app.logger.error("Invalid Twitch signature")
+        abort(403)
+    
+    # Handle the event
     event_type = request.headers.get('Twitch-Eventsub-Message-Type')
-    event_data = request.json
-
     if event_type == 'webhook_callback_verification':
-        return jsonify({'challenge': event_data['challenge']})
+        challenge = request.json['challenge']
+        return challenge, 200, {'Content-Type': 'text/plain'}
+    elif event_type == 'notification':
+        # Process the event
+        event_data = request.json
+        current_app.logger.info(f"Received event: {event_data}")
+        # ... process the event ...
+        return '', 204
+    else:
+        current_app.logger.error(f"Unknown event type: {event_type}")
+        abort(400)
 
-    if event_type == 'notification':
-        subscription_type = event_data['subscription']['type']
-        event = event_data['event']
-        broadcaster_id = event['broadcaster_user_id']
+@main.route('/manage_subscriptions', methods=['GET'])
+@login_required
+def manage_subscriptions_page():
+    return render_template('manage_subscriptions.html')
 
-        streamer = Streamer.query.filter_by(twitch_id=broadcaster_id).first()
-        if not streamer:
-            abort(404, description="Streamer not found")
+@main.route('/api/list_subscriptions', methods=['GET'])
+@login_required
+def api_list_subscriptions():
+    async def async_list():
+        subscriptions = await list_all_subscriptions()
+        if not subscriptions:
+            return {"message": "No active subscriptions found"}
+        return [{"id": sub.id, "type": sub.type, "status": sub.status} for sub in subscriptions]
 
-        if subscription_type == 'stream.online':
-            streamer.is_live = True
-        elif subscription_type == 'stream.offline':
-            streamer.is_live = False
-        elif subscription_type == 'channel.update':
-            streamer.stream_title = event.get('title')
-            streamer.game_name = event.get('category_name')
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        result = loop.run_until_complete(async_list())
+    finally:
+        loop.close()
+    return jsonify(result)
 
-        db.session.commit()
+@main.route('/api/delete_subscriptions', methods=['POST'])
+@login_required
+def api_delete_subscriptions():
+    async def async_delete():
+        return await delete_all_subscriptions()
 
-    return jsonify(success=True), 200
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        result = loop.run_until_complete(async_delete())
+    finally:
+        loop.close()
+    return jsonify({"message": result})
+
+@shared_task
+def background_resubscribe():
+    from app import create_app
+    
+    app = create_app()
+    
+    async def async_resubscribe():
+        with app.app_context():
+            streamers = Streamer.query.all()
+            results = []
+            for streamer in streamers:
+                try:
+                    success = await subscribe_to_events(streamer, app)
+                    if success:
+                        results.append(f"Resubscribed to {streamer.username}")
+                    else:
+                        results.append(f"Failed to resubscribe to {streamer.username}")
+                except Exception as e:
+                    results.append(f"Error resubscribing to {streamer.username}: {str(e)}")
+            return results
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(async_resubscribe())
+    finally:
+        loop.close()
+
+@main.route('/api/resubscribe_all', methods=['POST'])
+@login_required
+def resubscribe_all():
+    task = background_resubscribe.delay()
+    return jsonify({"message": "Resubscribe process started", "task_id": str(task.id)}), 202
+
+@main.route('/api/resubscribe_status/<task_id>', methods=['GET'])
+@login_required
+def resubscribe_status(task_id):
+    task = background_resubscribe.AsyncResult(task_id)
+    if task.state == 'PENDING':
+        response = {
+            'state': task.state,
+            'status': 'Resubscribe process is pending...'
+        }
+    elif task.state != 'FAILURE':
+        response = {
+            'state': task.state,
+            'status': task.info
+        }
+    else:
+        response = {
+            'state': task.state,
+            'status': str(task.info)
+        }
+    return jsonify(response)

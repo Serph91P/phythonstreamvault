@@ -1,0 +1,56 @@
+{% extends "layout.html" %}
+{% block content %}
+<h1>Manage Twitch Subscriptions</h1>
+
+<button id="listSubscriptions">List All Subscriptions</button>
+<button id="deleteSubscriptions">Delete All Subscriptions</button>
+<button id="resubscribeAll">Resubscribe to All Streamers</button>
+
+<div id="result"></div>
+
+<script>
+function displayResult(data) {
+    const resultDiv = document.getElementById('result');
+    resultDiv.innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+}
+
+document.getElementById('listSubscriptions').addEventListener('click', function() {
+    fetch('/api/list_subscriptions')
+        .then(response => response.json())
+        .then(data => displayResult(data))
+        .catch(error => console.error('Error:', error));
+});
+
+document.getElementById('deleteSubscriptions').addEventListener('click', function() {
+    fetch('/api/delete_subscriptions', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => displayResult(data))
+        .catch(error => console.error('Error:', error));
+});
+
+document.getElementById('resubscribeAll').addEventListener('click', function() {
+    fetch('/api/resubscribe_all', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            displayResult({"message": "Resubscribe process started. Please wait..."});
+            checkResubscribeStatus(data.task_id);
+        })
+        .catch(error => console.error('Error:', error));
+});
+
+function checkResubscribeStatus(taskId) {
+    fetch('/api/resubscribe_status/' + taskId)
+        .then(response => response.json())
+        .then(data => {
+            if (data.state === 'PENDING') {
+                displayResult({"message": "Resubscribe process is still running..."});
+                setTimeout(() => checkResubscribeStatus(taskId), 2000);
+            } else {
+                displayResult(data);
+            }
+        })
+        .catch(error => console.error('Error:', error));
+}
+
+</script>
+{% endblock %}

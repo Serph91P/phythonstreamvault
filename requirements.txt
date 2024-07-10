@@ -5,8 +5,10 @@ Flask-Login
 Flask-WTF
 Flask-Migrate
 celery
+redis
 gunicorn
 streamlink
 Werkzeug
 email_validator
 twitchAPI
+tenacity

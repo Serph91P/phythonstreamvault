@@ -1,14 +1,15 @@
 {% extends "layout.html" %}
 {% block content %}
 <h1>Dashboard</h1>
-<form method="POST" action="{{ url_for('main.add_streamer') }}">
-    <input type="text" name="username" placeholder="Streamer Username">
+<form id="add-streamer-form">
+    <input type="text" name="username" placeholder="Streamer Username" required>
     <button type="submit">Add Streamer</button>
 </form>
-<ul>
+<div id="status-message"></div>
+<ul id="streamer-list">
 {% for streamer in streamers %}
-    <li>
-        {{ streamer.username }} 
+    <li id="streamer-{{ streamer.id }}">
+        {{ streamer.username }}
         {% if streamer.is_live %}
             <span style="color: green;">Online</span>
         {% else %}
@@ -20,7 +21,72 @@
         {% if streamer.game_name %}
             ({{ streamer.game_name }})
         {% endif %}
+        <button class="delete-streamer" data-id="{{ streamer.id }}" data-name="{{ streamer.username }}">Löschen</button>
     </li>
 {% endfor %}
 </ul>
+
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script>
+$(document).ready(function() {
+    $('#add-streamer-form').on('submit', function(e) {
+        e.preventDefault();
+        var form = $(this);
+        $('#status-message').text('Streamer wird hinzugefügt...');
+        $.ajax({
+            url: '{{ url_for("main.add_streamer") }}',
+            type: 'POST',
+            data: form.serialize(),
+            success: function(data) {
+                if (data.task_id) {
+                    checkStatus(data.task_id);
+                } else {
+                    $('#status-message').text(data.status || 'Streamer wird hinzugefügt...');
+                }
+            },
+            error: function(jqXHR) {
+                $('#status-message').text('Fehler beim Hinzufügen des Streamers: ' + (jqXHR.responseJSON ? jqXHR.responseJSON.error : 'Unbekannter Fehler'));
+            }
+        });
+    });
+
+    function checkStatus(taskId) {
+        $.get('{{ url_for("main.task_status", task_id="") }}' + taskId, function(data) {
+            if (data.state === 'SUCCESS') {
+                $('#status-message').text('Streamer wurde erfolgreich hinzugefügt: ' + data.result);
+                location.reload();  // Seite neu laden, um den neuen Streamer anzuzeigen
+            } else if (data.state === 'FAILURE') {
+                $('#status-message').text('Fehler beim Hinzufügen des Streamers: ' + data.status);
+            } else {
+                $('#status-message').text(data.status || 'Streamer wird hinzugefügt...');
+                setTimeout(function() {
+                    checkStatus(taskId);
+                }, 2000);
+            }
+        }).fail(function() {
+            $('#status-message').text('Fehler beim Abrufen des Task-Status');
+        });
+    }
+
+    $('.delete-streamer').on('click', function() {
+        var streamerId = $(this).data('id');
+        var streamerName = $(this).data('name');
+        if (confirm("Möchten Sie den Streamer '" + streamerName + "' wirklich löschen? Alle zugehörigen Daten werden gelöscht.")) {
+            $.ajax({
+                url: '/delete_streamer/' + streamerId,
+                type: 'POST',
+                success: function(response) {
+                    if (response.status === 'success') {
+                        $('#streamer-' + streamerId).remove();
+                        alert(response.message);
+                    }
+                },
+                error: function() {
+                    alert('Fehler beim Löschen des Streamers');
+                }
+            });
+        }
+    });
+});
+</script>
 {% endblock %}

@@ -8,7 +8,7 @@ class Config:
     
     # Celery configurations
     CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'amqp://user:password@rabbitmq:5672/')
-    CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'rpc://')
+    CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://redis:6379/0')
     
     # Application specific configurations
     RECORDINGS_DIR = os.environ.get('RECORDINGS_DIR', '/recordings/')
@@ -19,12 +19,6 @@ class Config:
     TWITCH_WEBHOOK_SECRET = os.environ.get('TWITCH_WEBHOOK_SECRET')
     
     # URL configurations
-    BASE_URL = os.environ.get('BASE_URL', 'http://localhost:5000')
-    WEBHOOK_PATH = '/twitch/webhook'
+    BASE_URL = os.environ.get('BASE_URL')
+    WEBHOOK_PATH = '/webhook/callback'
     CALLBACK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
-    
-    # Celery broker configurations
-    BROKER_CONNECTION_RETRY_ON_STARTUP = True
-    BROKER_CONNECTION_MAX_RETRIES = None
-    BROKER_HEARTBEAT = 10
-    BROKER_CONNECTION_TIMEOUT = 30
