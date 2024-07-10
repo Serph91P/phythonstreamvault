@@ -45,8 +45,18 @@ async def setup_eventsub(app, twitch_instance):
             return None
         
         current_app.logger.info("Starting EventSubWebhook...")
-        await eventsub.start()
-        current_app.logger.info("EventSubWebhook started successfully")
+        try:
+            await eventsub.start()
+            current_app.logger.info("EventSubWebhook started successfully")
+        except Exception as start_error:
+            current_app.logger.error(f"Failed to start EventSubWebhook: {str(start_error)}")
+            current_app.logger.error(traceback.format_exc())
+            # Try to get more information about the error
+            if hasattr(start_error, 'errno'):
+                current_app.logger.error(f"Error number: {start_error.errno}")
+            if hasattr(start_error, 'strerror'):
+                current_app.logger.error(f"Error string: {start_error.strerror}")
+            return None
         return eventsub
     except Exception as e:
         current_app.logger.error(f"Failed to initialize or start EventSub: {str(e)}")

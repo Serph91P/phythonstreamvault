@@ -43,21 +43,20 @@ def create_app():
 
     from app.twitch_api import setup_twitch, setup_eventsub, ensure_twitch_initialized
 
+    @app.before_request
     def setup_twitch_wrapper():
         if not hasattr(app, 'twitch_setup_done'):
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(ensure_twitch_initialized(app))
-                app.logger.info("Twitch and EventSub initialization completed")
-            except Exception as e:
-                app.logger.error(f"Error in Twitch setup: {str(e)}")
-                app.logger.error(traceback.format_exc())
-            finally:
-                loop.close()
-            app.twitch_setup_done = True
+            def run_setup():
+                try:
+                    run_async(app, ensure_twitch_initialized(app))
+                    app.logger.info("Twitch and EventSub initialization completed")
+                except Exception as e:
+                    app.logger.error(f"Error in Twitch setup: {str(e)}")
+                    app.logger.error(traceback.format_exc())
 
-    app.before_first_request(setup_twitch_wrapper)
+            thread = threading.Thread(target=run_setup)
+            thread.start()
+            app.twitch_setup_done = True
 
     return app
 
