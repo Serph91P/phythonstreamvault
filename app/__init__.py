@@ -41,11 +41,11 @@ def create_app():
     from app.main import main as main_blueprint
     app.register_blueprint(main_blueprint)
 
-    from app.twitch_api import setup_twitch, setup_eventsub
+    from app.twitch_api import setup_twitch, setup_eventsub, ensure_twitch_initialized
 
     def setup_twitch_wrapper():
         if not hasattr(app, 'twitch_setup_done'):
-            thread = threading.Thread(target=run_async, args=(app, setup_eventsub(app)))
+            thread = threading.Thread(target=run_async, args=(app, ensure_twitch_initialized(app)))
             thread.start()
             app.twitch_setup_done = True
 
