@@ -37,6 +37,10 @@ def add_streamer():
             return jsonify({'error': 'An error occurred. Please try again later.'}), 500
     return jsonify({'error': 'No username provided'}), 400
 
+@main.route('/health')
+def health_check():
+    return jsonify({"status": "healthy"}), 200
+
 @main.route('/task_status/<task_id>')
 @login_required
 def task_status(task_id):
@@ -72,22 +76,7 @@ def delete_streamer(streamer_id):
 @main.route('/webhook/callback', methods=['POST'])
 def twitch_webhook_callback():
     # Verify Twitch signature
-    twitch_signature = request.headers.get('Twitch-Eventsub-Message-Signature')
-    message_id = request.headers.get('Twitch-Eventsub-Message-Id')
-    timestamp = request.headers.get('Twitch-Eventsub-Message-Timestamp')
-    message = message_id + timestamp + request.data.decode('utf-8')
-    
-    if not twitch_signature:
-        current_app.logger.error("Twitch-Eventsub-Message-Signature header is missing")
-        abort(400)
-    
-    expected_signature = 'sha256=' + hmac.new(
-        current_app.config['TWITCH_WEBHOOK_SECRET'].encode('utf-8'),
-        message.encode('utf-8'),
-        hashlib.sha256
-    ).hexdigest()
-    
-    if not hmac.compare_digest(twitch_signature, expected_signature):
+    if not verify_twitch_signature(request):
         current_app.logger.error("Invalid Twitch signature")
         abort(403)
     
@@ -100,11 +89,67 @@ def twitch_webhook_callback():
         # Process the event
         event_data = request.json
         current_app.logger.info(f"Received event: {event_data}")
-        # ... process the event ...
+        handle_event(event_data['subscription']['type'], event_data['event'])
+        return '', 204
+    elif event_type == 'revocation':
+        # Handle revocation
+        current_app.logger.warning(f"Subscription revoked: {request.json}")
         return '', 204
     else:
         current_app.logger.error(f"Unknown event type: {event_type}")
         abort(400)
+
+def verify_twitch_signature(request):
+    message_id = request.headers.get('Twitch-Eventsub-Message-Id')
+    timestamp = request.headers.get('Twitch-Eventsub-Message-Timestamp')
+    signature = request.headers.get('Twitch-Eventsub-Message-Signature')
+    
+    if not message_id or not timestamp or not signature:
+        return False
+    
+    message = message_id + timestamp + request.data.decode('utf-8')
+    expected_signature = 'sha256=' + hmac.new(
+        current_app.config['TWITCH_WEBHOOK_SECRET'].encode('utf-8'),
+        message.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+    
+    return hmac.compare_digest(signature, expected_signature)
+
+def handle_event(event_type, event_data):
+    current_app.logger.info(f"Received event: {event_type}")
+    current_app.logger.info(f"Event data: {event_data}")
+    
+    if event_type == 'stream.online':
+        handle_stream_online(event_data)
+    elif event_type == 'stream.offline':
+        handle_stream_offline(event_data)
+    elif event_type == 'channel.update':
+        handle_channel_update(event_data)
+    else:
+        current_app.logger.warning(f"Unhandled event type: {event_type}")
+
+def handle_stream_online(event_data):
+    streamer = Streamer.query.filter_by(twitch_id=int(event_data['broadcaster_user_id'])).first()
+    if streamer:
+        streamer.is_live = True
+        db.session.commit()
+        current_app.logger.info(f"Streamer {streamer.username} is now live")
+
+def handle_stream_offline(event_data):
+    streamer = Streamer.query.filter_by(twitch_id=int(event_data['broadcaster_user_id'])).first()
+    if streamer:
+        streamer.is_live = False
+        db.session.commit()
+        current_app.logger.info(f"Streamer {streamer.username} is now offline")
+
+def handle_channel_update(event_data):
+    streamer = Streamer.query.filter_by(twitch_id=int(event_data['broadcaster_user_id'])).first()
+    if streamer:
+        streamer.stream_title = event_data['title']
+        streamer.game_name = event_data['category_name']
+        db.session.commit()
+        current_app.logger.info(f"Channel updated for streamer {streamer.username}")
 
 @main.route('/manage_subscriptions', methods=['GET'])
 @login_required
