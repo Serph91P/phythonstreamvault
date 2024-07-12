@@ -25,3 +25,12 @@ class Streamer(db.Model):
     last_updated = db.Column(db.DateTime, default=datetime.utcnow)
 
     user = db.relationship('User', back_populates='streamers')
+
+class TwitchEvent(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    event_type = db.Column(db.String(80), nullable=False)
+    event_data = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<TwitchEvent {self.event_type}>'

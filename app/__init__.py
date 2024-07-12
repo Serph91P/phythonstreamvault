@@ -1,6 +1,5 @@
-import asyncio
-import threading
 import os
+import traceback
 from flask import Flask
 from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_sqlalchemy import SQLAlchemy
@@ -8,7 +7,6 @@ from flask_bcrypt import Bcrypt
 from flask_login import LoginManager
 from flask_migrate import Migrate
 from .celery import make_celery, celery
-from .twitch_api import ensure_twitch_initialized
 
 db = SQLAlchemy()
 bcrypt = Bcrypt()
@@ -16,18 +14,6 @@ login_manager = LoginManager()
 login_manager.login_view = 'auth.login'
 login_manager.login_message = 'Please log in to access this page.'
 migrate = Migrate()
-
-def async_init(app):
-    async def run_async_init():
-        await ensure_twitch_initialized(app)
-    
-    def start_background_task():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(run_async_init())
-    
-    thread = threading.Thread(target=start_background_task)
-    thread.start()
 
 def create_app():
     app = Flask(__name__)
@@ -54,10 +40,20 @@ def create_app():
     from app.main import main as main_blueprint
     app.register_blueprint(main_blueprint)
 
-    async_init(app)
+    with app.app_context():
+        from app.twitch_api import check_eventsub_webhook
+        check_eventsub_webhook()
+
+    from .twitch_api import async_init
+    try:
+        async_init(app)
+    except Exception as e:
+        app.logger.error(f"Failed to initialize Twitch API: {str(e)}")
+        app.logger.error(traceback.format_exc())
 
     app.logger.info("Application initialized successfully")
     return app
+
 
 if __name__ == "__main__":
     app = create_app()
