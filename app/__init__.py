@@ -36,24 +36,16 @@ def create_app():
 
     from app.auth import auth as auth_blueprint
     app.register_blueprint(auth_blueprint, url_prefix='/auth')
-
+    
     from app.main import main as main_blueprint
     app.register_blueprint(main_blueprint)
 
     with app.app_context():
-        from app.twitch_api import check_eventsub_webhook
-        check_eventsub_webhook()
-
-    from .twitch_api import async_init
-    try:
+        from .twitch_api import async_init
         async_init(app)
-    except Exception as e:
-        app.logger.error(f"Failed to initialize Twitch API: {str(e)}")
-        app.logger.error(traceback.format_exc())
 
     app.logger.info("Application initialized successfully")
     return app
-
 
 if __name__ == "__main__":
     app = create_app()

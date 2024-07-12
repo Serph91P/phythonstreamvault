@@ -1,5 +1,6 @@
 import os
 import secrets
+from urllib.parse import urljoin
 
 class Config:
     BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -21,8 +22,8 @@ class Config:
     # URL configurations
     BASE_URL = os.environ.get('BASE_URL')
     WEBHOOK_PATH = '/webhook/callback'
-    EVENTSUB_WEBHOOK_PORT = int(os.environ.get('EVENTSUB_WEBHOOK_PORT', 8080))
-    CALLBACK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
+    EVENTSUB_WEBHOOK_PORT = int(os.environ.get('EVENTSUB_WEBHOOK_PORT'))
+    CALLBACK_URL = urljoin(BASE_URL, WEBHOOK_PATH)
 
 # print(f"TWITCH_CLIENT_ID: {os.getenv('TWITCH_CLIENT_ID')}")
 # print(f"TWITCH_CLIENT_SECRET: {os.getenv('TWITCH_CLIENT_SECRET')}")
