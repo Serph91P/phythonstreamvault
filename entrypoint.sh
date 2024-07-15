@@ -4,6 +4,10 @@ set -e
 echo "Starting entrypoint script"
 
 # Initialize the database
+echo "Initializing database..."
+flask db init || echo "Database already initialized"
+
+# Run migrations
 echo "Running database migrations..."
 flask db migrate || echo "No new migrations to run"
 
