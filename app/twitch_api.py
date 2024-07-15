@@ -71,27 +71,26 @@ async def setup_eventsub(app, twitch_instance):
         return None
 
 def init_twitch_api(app):
-    twitch_api = TwitchAPI()
-    
-    if twitch_api.twitch is None:
-        app.logger.info("Initializing Twitch API")
-        
-        if not all([app.config.get(key) for key in ['TWITCH_CLIENT_ID', 'TWITCH_CLIENT_SECRET', 'TWITCH_WEBHOOK_SECRET', 'CALLBACK_URL', 'EVENTSUB_WEBHOOK_PORT']]):
-            app.logger.error("Missing required configuration values")
-            return None
+    if not all([app.config.get(key) for key in ['TWITCH_CLIENT_ID', 'TWITCH_CLIENT_SECRET', 'TWITCH_WEBHOOK_SECRET', 'CALLBACK_URL', 'EVENTSUB_WEBHOOK_PORT']]):
+        app.logger.error("Missing required configuration values")
+        return None
 
-        async def initialize():
-            try:
-                twitch_api.twitch = await setup_twitch(app)
-            except Exception as e:
-                app.logger.error(f"Error during initialization: {str(e)}")
-                app.logger.error(traceback.format_exc())
+    twitch = asyncio.run(setup_twitch(app))
+    return twitch
 
-        asyncio.run(initialize())
-    else:
-        app.logger.info("Twitch API already initialized")
-    
-    return twitch_api.twitch
+async def setup_redis(app):
+    app.logger.info("Entering setup_redis")
+    try:
+        redis_url = app.config['REDIS_URL']
+        app.logger.info(f"Initializing Redis with REDIS_URL: {redis_url}")
+        redis_client = redis.from_url(redis_url)
+        await redis_client.ping()
+        app.logger.info("Redis connected successfully")
+        return redis_client
+    except Exception as e:
+        app.logger.error(f"Failed to initialize Redis: {str(e)}")
+        app.logger.error(traceback.format_exc())
+        return None
 
 def print_config(app):
     app.logger.info("Printing configuration values:")

@@ -11,6 +11,8 @@ from .celery import make_celery, celery
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+twitch_api_instance = None
+
 db = SQLAlchemy()
 bcrypt = Bcrypt()
 login_manager = LoginManager()
@@ -19,31 +21,31 @@ login_manager.login_message = 'Please log in to access this page.'
 migrate = Migrate()
 
 def create_app():
-    worker_id = os.environ.get('GUNICORN_WORKER_ID', 'Unknown')
-    logger.info(f"Worker {worker_id}: Starting create_app function")
+    global twitch_api_instance
     
     app = Flask(__name__)
     app.config.from_object('config.Config')
     
-    logger.info(f"Worker {worker_id}: Initializing app components")
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
     db.init_app(app)
     bcrypt.init_app(app)
     login_manager.init_app(app)
     migrate.init_app(app, db)
 
-    logger.info(f"Worker {worker_id}: Registering blueprints")
+    logger.info("Registering blueprints")
     from app.auth import auth as auth_blueprint
     app.register_blueprint(auth_blueprint, url_prefix='/auth')
     from app.main import main as main_blueprint
     app.register_blueprint(main_blueprint)
 
-    if os.environ.get('Container_Type') != 'eventsub':
-        logger.info(f"Worker {worker_id}: Initializing Twitch API")
+    if twitch_api_instance is None:
+        logger.info("Initializing Twitch API")
         from app.twitch_api import init_twitch_api
-        app.config['TWITCH_API'] = init_twitch_api(app)
-
-    logger.info(f"Worker {worker_id}: Application initialization complete")
+        twitch_api_instance = init_twitch_api(app)
+    
+    app.config['TWITCH_API'] = twitch_api_instance
+    
+    logger.info("Application initialization complete")
     return app
 
 if __name__ == "__main__":
