@@ -1,8 +1,10 @@
 import asyncio
 import traceback
+from config import Config
 from flask import current_app
 from twitchAPI.twitch import Twitch
 from twitchAPI.eventsub.webhook import EventSubWebhook
+from twitchAPI.object.eventsub import ChannelFollowEvent
 from contextlib import asynccontextmanager
 import redis
 from redis.exceptions import LockError
@@ -11,6 +13,38 @@ class TwitchAPI:
     def __init__(self):
         self.twitch = None
         self.eventsub = None
+
+    async def get_eventsub_subscriptions(self):
+        subscriptions = await self.twitch.get_eventsub_subscriptions()
+        return [sub.to_dict() for sub in subscriptions]
+
+    async def delete_all_subscriptions(self):
+        subscriptions = await self.twitch.get_eventsub_subscriptions()
+        for sub in subscriptions:
+            await self.twitch.delete_eventsub_subscription(sub.id)
+        return {"message": "All subscriptions deleted successfully"}
+
+    async def subscribe_to_stream_online(self, broadcaster_id):
+        try:
+            await self.eventsub.listen_stream_online(broadcaster_id, self.on_stream_online)
+            return {"message": f"Subscribed to stream online events for broadcaster {broadcaster_id}"}
+        except Exception as e:
+            return {"error": f"Failed to subscribe: {str(e)}"}
+
+    async def on_stream_online(self, data):
+        print(f"Stream online: {data}")
+        # Add your logic here to handle the stream online event
+
+    async def subscribe_to_channel_follow(self, broadcaster_id):
+        try:
+            await self.eventsub.listen_channel_follow_v2(broadcaster_id, self.on_channel_follow)
+            return {"message": f"Subscribed to channel follow events for broadcaster {broadcaster_id}"}
+        except Exception as e:
+            return {"error": f"Failed to subscribe: {str(e)}"}
+
+    async def on_channel_follow(self, data: ChannelFollowEvent):
+        print(f"New follower: {data.user_name} followed {data.broadcaster_user_name}")
+        # Add your logic here to handle the channel follow event
 
 @asynccontextmanager
 async def manage_async_loop():
@@ -24,7 +58,6 @@ async def manage_async_loop():
 async def setup_twitch(app):
     app.logger.info("Entering setup_twitch")
     try:
-        print_config(app)
         client_id = app.config['TWITCH_CLIENT_ID']
         client_secret = app.config['TWITCH_CLIENT_SECRET']
         app.logger.info(f"Initializing Twitch API with CLIENT_ID: {client_id}")
@@ -45,25 +78,19 @@ async def setup_eventsub(app, twitch_instance):
             return None
 
         callback_url = app.config['CALLBACK_URL']
-        port = int(app.config['EVENTSUB_WEBHOOK_PORT'])
+        port = Config.get_eventsub_webhook_port()
         secret = app.config['TWITCH_WEBHOOK_SECRET']
         
         app.logger.info(f"Full callback URL: {callback_url}")
         app.logger.info(f"Initializing EventSubWebhook with CALLBACK_URL: {callback_url}, PORT: {port}")
         eventsub = EventSubWebhook(callback_url, port, secret, twitch_instance)
         
-        try:
-            if asyncio.iscoroutinefunction(eventsub.start):
-                await eventsub.start()
-            else:
-                eventsub.start()
-            app.logger.info("EventSubWebhook started successfully")
-        except OSError as e:
-            if e.errno == 98:  # Address already in use
-                app.logger.info("EventSubWebhook already running")
-            else:
-                raise
+        if asyncio.iscoroutinefunction(eventsub.start):
+            await eventsub.start()
+        else:
+            eventsub.start()
         
+        app.logger.info("EventSubWebhook started successfully")
         return eventsub
     except Exception as e:
         app.logger.error(f"Failed to setup EventSub: {str(e)}")
@@ -71,12 +98,24 @@ async def setup_eventsub(app, twitch_instance):
         return None
 
 def init_twitch_api(app):
-    if not all([app.config.get(key) for key in ['TWITCH_CLIENT_ID', 'TWITCH_CLIENT_SECRET', 'TWITCH_WEBHOOK_SECRET', 'CALLBACK_URL', 'EVENTSUB_WEBHOOK_PORT']]):
-        app.logger.error("Missing required configuration values")
+    required_configs = ['TWITCH_CLIENT_ID', 'TWITCH_CLIENT_SECRET', 'TWITCH_WEBHOOK_SECRET', 'CALLBACK_URL']
+    missing_configs = [config for config in required_configs if not app.config.get(config)]
+    
+    app.config['EVENTSUB_WEBHOOK_PORT'] = Config.get_eventsub_webhook_port()
+    
+    if missing_configs:
+        app.logger.error(f"Missing required configuration values: {', '.join(missing_configs)}")
         return None
 
-    twitch = asyncio.run(setup_twitch(app))
-    return twitch
+    twitch_api = TwitchAPI()
+    
+    async def initialize():
+        twitch_api.twitch = await setup_twitch(app)
+        if twitch_api.twitch:
+            twitch_api.eventsub = await setup_eventsub(app, twitch_api.twitch)
+
+    asyncio.run(initialize())
+    return twitch_api
 
 async def setup_redis(app):
     app.logger.info("Entering setup_redis")
@@ -92,12 +131,23 @@ async def setup_redis(app):
         app.logger.error(traceback.format_exc())
         return None
 
-def print_config(app):
-    app.logger.info("Printing configuration values:")
-    config_keys = [
-        'TWITCH_CLIENT_ID', 'TWITCH_CLIENT_SECRET', 'TWITCH_WEBHOOK_SECRET',
-        'BASE_URL', 'CALLBACK_URL', 'EVENTSUB_WEBHOOK_PORT'
-    ]
-    for key in config_keys:
-        value = app.config.get(key, 'Not Set')
-        app.logger.info(f"{key}: {'Set' if value != 'Not Set' else value}")
+    # async def get_eventsub_subscriptions(self):
+    #     subscriptions = await self.twitch.get_eventsub_subscriptions()
+    #     return [sub.to_dict() for sub in subscriptions]
+
+    # async def delete_all_subscriptions(self):
+    #     subscriptions = await self.twitch.get_eventsub_subscriptions()
+    #     for sub in subscriptions:
+    #         await self.twitch.delete_eventsub_subscription(sub.id)
+    #     return {"message": "All subscriptions deleted successfully"}
+
+    # async def subscribe_to_stream_online(self, broadcaster_id):
+    #     try:
+    #         await self.eventsub.listen_stream_online(broadcaster_id, self.on_stream_online)
+    #         return {"message": f"Subscribed to stream online events for broadcaster {broadcaster_id}"}
+    #     except Exception as e:
+    #         return {"error": f"Failed to subscribe: {str(e)}"}
+
+    # async def on_stream_online(self, data):
+    #     print(f"Stream online: {data}")
+        # Add your logic here to handle the stream online event

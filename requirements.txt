@@ -4,6 +4,7 @@ Flask-Bcrypt
 Flask-Login
 Flask-WTF
 Flask-Migrate
+Flask-Session
 celery
 redis
 gunicorn

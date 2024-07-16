@@ -3,16 +3,8 @@ set -e
 
 echo "Starting entrypoint script"
 
-# Initialize the database
 echo "Initializing database..."
-flask db init || echo "Database already initialized"
-
-# Run migrations
-echo "Running database migrations..."
-flask db migrate || echo "No new migrations to run"
-
-echo "Upgrading database..."
-flask db upgrade
+python init_db.py
 
 echo "Starting Gunicorn..."
 exec gunicorn -c gunicorn.conf.py 'app.wsgi:app' \

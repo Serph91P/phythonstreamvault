@@ -5,7 +5,8 @@
     <div class="col-lg-5">
         <h2 class="mt-4">Create Admin Account</h2>
         <form method="POST">
-            {{ form.hidden_tag() }}
+            {{ form.csrf_token }}
+            <!-- {{ form.hidden_tag() }} -->
             <div class="form-group">
                 {{ form.username.label(class="form-control-label") }}
                 {{ form.username(class="form-control") }}

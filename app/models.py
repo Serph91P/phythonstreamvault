@@ -15,7 +15,7 @@ class User(db.Model, UserMixin):
     streamers = db.relationship('Streamer', back_populates='user', lazy=True)
 
 class Streamer(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
+    id = db.Column(db.String(50), primary_key=True)
     username = db.Column(db.String(50), unique=True, nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     twitch_id = db.Column(db.String(50), unique=True)
@@ -25,6 +25,16 @@ class Streamer(db.Model):
     last_updated = db.Column(db.DateTime, default=datetime.utcnow)
 
     user = db.relationship('User', back_populates='streamers')
+    streams = db.relationship('Stream', back_populates='streamer', lazy='dynamic')
+
+class Stream(db.Model):
+    id = db.Column(db.String(50), primary_key=True)
+    streamer_id = db.Column(db.String(50), db.ForeignKey('streamer.id'), nullable=False)
+    started_at = db.Column(db.DateTime, nullable=False)
+    ended_at = db.Column(db.DateTime)
+    type = db.Column(db.String(20))
+
+    streamer = db.relationship('Streamer', back_populates='streams')
 
 class TwitchEvent(db.Model):
     id = db.Column(db.Integer, primary_key=True)

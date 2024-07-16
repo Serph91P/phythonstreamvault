@@ -31,6 +31,9 @@ class Config:
     BASE_URL = os.environ.get('BASE_URL')
     WEBHOOK_PATH = '/webhook/callback'
     CALLBACK_URL = urljoin(BASE_URL, WEBHOOK_PATH)
+    REDIS_URL = os.environ.get('REDIS_URL', 'redis://streamvault_redis:6379/0')
+    WTF_CSRF_TIME_LIMIT = None
+
 
     @classmethod
     def get_eventsub_webhook_port(cls):

@@ -20,7 +20,7 @@ RUN useradd -m appuser && \
 
 USER appuser
 
-EXPOSE 8000 8082
+EXPOSE 8000 8080
 
 ENTRYPOINT ["/usr/src/app/entrypoint.sh"]
 

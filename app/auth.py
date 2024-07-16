@@ -3,6 +3,7 @@ from app import db, bcrypt
 from app.forms import LoginForm, SetupForm
 from app.models import User
 from flask_login import login_user, logout_user, login_required, current_user
+from flask_wtf.csrf import CSRFError
 
 auth = Blueprint('auth', __name__)
 
@@ -36,10 +37,19 @@ def setup():
         return redirect(url_for('main.index'))
     form = SetupForm()
     if form.validate_on_submit():
-        hashed_password = bcrypt.generate_password_hash(form.password.data).decode('utf-8')
-        user = User(username=form.username.data, email=form.email.data, password=hashed_password)
-        db.session.add(user)
-        db.session.commit()
-        flash('Admin account created successfully. You can now log in.', 'success')
-        return redirect(url_for('auth.login'))
+        try:
+            hashed_password = bcrypt.generate_password_hash(form.password.data).decode('utf-8')
+            user = User(username=form.username.data, email=form.email.data, password=hashed_password)
+            db.session.add(user)
+            db.session.commit()
+            login_user(user)
+            flash('Admin account created successfully. You are now logged in.', 'success')
+            return redirect(url_for('main.index'))
+        except Exception as e:
+            db.session.rollback()
+            flash(f'An error occurred: {str(e)}', 'danger')
     return render_template('auth/setup.html', title='Setup', form=form)
+
+@auth.errorhandler(CSRFError)
+def handle_csrf_error(e):
+    return render_template('csrf_error.html', reason=e.description), 400

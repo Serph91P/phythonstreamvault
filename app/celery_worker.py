@@ -6,6 +6,8 @@ app = create_app()
 app.app_context().push()
 
 @app.before_request
+def log_session_info():
+    logger.debug(f"Session data: {session}")
 def init_twitch():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
