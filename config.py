@@ -32,13 +32,8 @@ class Config:
     WEBHOOK_PATH = '/webhook/callback'
     CALLBACK_URL = urljoin(BASE_URL, WEBHOOK_PATH)
     REDIS_URL = os.environ.get('REDIS_URL', 'redis://streamvault_redis:6379/0')
-    WTF_CSRF_TIME_LIMIT = None
-    # SERVER_NAME = urlparse(BASE_URL).netloc
-    # SESSION_COOKIE_DOMAIN = SERVER_NAME
 
-    WTF_CSRF_ENABLED = True
-    WTF_CSRF_SECRET_KEY = os.environ.get('WTF_CSRF_SECRET_KEY') or 'default-csrf-secret-key'
-
+    SECRET_KEY = os.environ.get('SECRET_KEY') or 'your-secret-key'
 
     @classmethod
     def get_eventsub_webhook_port(cls):

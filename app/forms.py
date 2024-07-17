@@ -1,17 +1,25 @@
-from flask_wtf import FlaskForm
-from wtforms import StringField, PasswordField, SubmitField, BooleanField
-from wtforms.validators import DataRequired, Length, Email, EqualTo, ValidationError
-from app.models import User
+from flask import request
 
-class LoginForm(FlaskForm):
-    email = StringField('Email', validators=[DataRequired(), Email()])
-    password = PasswordField('Password', validators=[DataRequired()])
-    remember = BooleanField('Remember Me')
-    submit = SubmitField('Login')
+class LoginForm:
+    def __init__(self):
+        self.email = None
+        self.password = None
+        self.remember = None
 
-class SetupForm(FlaskForm):
-    username = StringField('Username', validators=[DataRequired(), Length(min=2, max=20)])
-    email = StringField('Email', validators=[DataRequired(), Email()])
-    password = PasswordField('Password', validators=[DataRequired()])
-    confirm_password = PasswordField('Confirm Password', validators=[DataRequired(), EqualTo('password')])
-    submit = SubmitField('Create Admin Account')
+    def validate_on_submit(self):
+        self.email = request.form.get('email')
+        self.password = request.form.get('password')
+        self.remember = request.form.get('remember') == 'on'
+        return all([self.email, self.password])
+
+class SetupForm:
+    def __init__(self):
+        self.username = None
+        self.email = None
+        self.password = None
+
+    def validate_on_submit(self):
+        self.username = request.form.get('username')
+        self.email = request.form.get('email')
+        self.password = request.form.get('password')
+        return all([self.username, self.email, self.password])

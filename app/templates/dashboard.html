@@ -2,7 +2,7 @@
 {% block content %}
 <h1>Dashboard</h1>
 <form id="add-streamer-form">
-    {{ form.csrf_token }}
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="text" name="username" placeholder="Streamer Username" required>
     <button type="submit">Add Streamer</button>
 </form>
