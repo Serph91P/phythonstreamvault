@@ -2,6 +2,9 @@ server {
     listen 80;
 
     server_name ${BASE_URL};
+    proxy_buffer_size   128k;
+    proxy_buffers   4 256k;
+    proxy_busy_buffers_size   256k;
 
     location / {
         proxy_pass http://streamvault:8000;

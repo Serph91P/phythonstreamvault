@@ -1,26 +1,28 @@
-FROM python:3.9
+FROM python:3.11-alpine
 
 WORKDIR /usr/src/app
 
-RUN apt-get update && apt-get install -y netcat-openbsd curl
+RUN apk add --no-cache curl bash
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p /recordings && \
-    mkdir -p /usr/src/app/instance
+RUN mkdir -p /recordings /usr/src/app/instance
 
-COPY entrypoint.sh /usr/src/app/entrypoint.sh
-RUN chmod +x /usr/src/app/entrypoint.sh
+COPY ./entrypoint.sh /usr/src/app/entrypoint.sh
+RUN chmod +x /usr/src/app/entrypoint.sh && \
+    sed -i 's/\r$//' /usr/src/app/entrypoint.sh
 
-RUN useradd -m appuser && \
+RUN ls -la /usr/src/app/entrypoint.sh
+
+
+RUN adduser -D appuser && \
     chown -R appuser:appuser /usr/src/app /recordings
 
 USER appuser
 
 EXPOSE 8000 8080
 
-ENTRYPOINT ["/usr/src/app/entrypoint.sh"]
-
+ENTRYPOINT ["/bin/sh", "-c", "/usr/src/app/entrypoint.sh"]

@@ -10,7 +10,7 @@ from flask_bcrypt import Bcrypt
 from flask_login import LoginManager
 from .celery import make_celery, celery
 import redis
-from flask_wtf.csrf import CSRFProtect, CSRFError
+from flask_wtf.csrf import CSRFProtect, CSRFError, generate_csrf
 from redis.exceptions import LockError
 
 # Logging setup
@@ -43,9 +43,11 @@ def create_app():
     # Session configuration
     app.config['SESSION_TYPE'] = 'redis'
     app.config['SESSION_REDIS'] = redis.Redis.from_url(app.config['REDIS_URL'])
-    app.config['SESSION_COOKIE_SECURE'] = True
-    app.config['SESSION_COOKIE_HTTPONLY'] = True
-    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+    app.config['WTF_CSRF_TIME_LIMIT'] = None
+    app.config['WTF_CSRF_SSL_STRICT'] = False
+    app.config['WTF_CSRF_COOKIE_SECURE'] = True
+    app.config['WTF_CSRF_COOKIE_HTTPONLY'] = True
+    app.config['WTF_CSRF_COOKIE_SAMESITE'] = 'Lax'
     Session(app)
 
     # CSRF protection
@@ -59,10 +61,25 @@ def create_app():
         return render_template('csrf_error.html', reason=e.description), 400
 
     @app.before_request
-    def csrf_protect():
-        if request.method == "POST":
-            csrf_logger.debug(f'CSRF Token in form: {request.form.get("csrf_token")}')
-            csrf_logger.debug(f'CSRF Token in session: {session.get("csrf_token")}')
+    def log_request_info():
+        csrf_logger.debug(f"Request Method: {request.method}")
+        csrf_logger.debug(f"Request CSRF token: {request.form.get('csrf_token')}")
+        csrf_logger.debug(f"Session CSRF token: {session.get('csrf_token')}")
+        csrf_logger.debug(f"Cookie CSRF token: {request.cookies.get('csrf_token')}")
+        csrf_logger.debug(f"Session data: {session}")
+
+    @app.after_request
+    def log_response_info(response):
+        response.set_cookie('csrf_token', generate_csrf())
+        csrf_logger.debug(f"Response Status: {response.status}")
+        csrf_token = generate_csrf()
+        session['csrf_token'] = csrf_token
+        response.set_cookie('csrf_token', csrf_token, secure=True, httponly=True, samesite='Lax')
+        return response
+
+    @app.errorhandler(CSRFError)
+    def handle_csrf_error(e):
+        return render_template('csrf_error.html', reason=e.description), 400
 
     # Register blueprints
     from app.auth import auth as auth_blueprint

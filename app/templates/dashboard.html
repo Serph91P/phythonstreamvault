@@ -30,6 +30,15 @@
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 <script>
 $(document).ready(function() {
+    var csrfToken = $('meta[name=csrf-token]').attr('content');
+    $.ajaxSetup({
+        beforeSend: function(xhr, settings) {
+            if (!/^(GET|HEAD|OPTIONS|TRACE)$/i.test(settings.type) && !this.crossDomain) {
+                xhr.setRequestHeader("X-CSRFToken", csrfToken);
+            }
+        }
+    });
+
     $('#add-streamer-form').on('submit', function(e) {
         e.preventDefault();
         var form = $(this);
@@ -38,9 +47,6 @@ $(document).ready(function() {
             url: '{{ url_for("main.add_streamer") }}',
             type: 'POST',
             data: form.serialize(),
-            headers: {
-                'X-CSRFToken': '{{ form.csrf_token.current_token }}'
-            },
             success: function(data) {
                 if (data.task_id) {
                     checkStatus(data.task_id);
@@ -58,7 +64,7 @@ $(document).ready(function() {
         $.get('{{ url_for("main.task_status", task_id="") }}' + taskId, function(data) {
             if (data.state === 'SUCCESS') {
                 $('#status-message').text('Streamer wurde erfolgreich hinzugefügt: ' + data.result);
-                location.reload();  // Seite neu laden, um den neuen Streamer anzuzeigen
+                location.reload();
             } else if (data.state === 'FAILURE') {
                 $('#status-message').text('Fehler beim Hinzufügen des Streamers: ' + data.status);
             } else {

@@ -1,11 +1,11 @@
 import os
 import secrets
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 class Config:
     BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-    SECRET_KEY = os.environ.get('SECRET_KEY') or secrets.token_hex(16)
     SQLALCHEMY_DATABASE_URI = 'sqlite:///' + os.path.join(BASE_DIR, 'site.db')
+    SQLALCHEMY_DATABASE_PASSWORD = os.environ.get('DB_PASSWORD') or 'default-db-password'
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
     PREFERRED_URL_SCHEME = 'https'
@@ -33,6 +33,11 @@ class Config:
     CALLBACK_URL = urljoin(BASE_URL, WEBHOOK_PATH)
     REDIS_URL = os.environ.get('REDIS_URL', 'redis://streamvault_redis:6379/0')
     WTF_CSRF_TIME_LIMIT = None
+    # SERVER_NAME = urlparse(BASE_URL).netloc
+    # SESSION_COOKIE_DOMAIN = SERVER_NAME
+
+    WTF_CSRF_ENABLED = True
+    WTF_CSRF_SECRET_KEY = os.environ.get('WTF_CSRF_SECRET_KEY') or 'default-csrf-secret-key'
 
 
     @classmethod

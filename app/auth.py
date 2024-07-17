@@ -1,5 +1,5 @@
-from flask import Blueprint, render_template, redirect, url_for, flash, request
-from app import db, bcrypt
+from flask import Blueprint, render_template, redirect, url_for, flash, request, make_response
+from app import db, bcrypt, csrf_logger
 from app.forms import LoginForm, SetupForm
 from app.models import User
 from flask_login import login_user, logout_user, login_required, current_user
@@ -11,18 +11,21 @@ auth = Blueprint('auth', __name__)
 def login():
     if current_user.is_authenticated:
         return redirect(url_for('main.index'))
-    if not User.query.first():
-        return redirect(url_for('auth.setup'))
     form = LoginForm()
     if form.validate_on_submit():
+        csrf_logger.debug(f"Form CSRF token: {form.csrf_token.data}")
+        csrf_logger.debug(f"Session CSRF token: {session.get('csrf_token')}")
+        csrf_logger.debug(f"Cookie CSRF token: {request.cookies.get('csrf_token')}")
         user = User.query.filter_by(email=form.email.data).first()
         if user and bcrypt.check_password_hash(user.password, form.password.data):
             login_user(user, remember=form.remember.data)
-            next_page = request.args.get('next')
-            return redirect(next_page) if next_page else redirect(url_for('main.index'))
+            response = make_response(redirect(url_for('main.index')))
+            response.set_cookie('csrf_token', request.cookies.get('csrf_token'))
+            return response
         else:
             flash('Login unsuccessful. Please check email and password', 'danger')
     return render_template('login.html', title='Login', form=form)
+
 
 @auth.route('/logout')
 @login_required
