@@ -1,7 +1,6 @@
 import os
 import logging
 
-# Set up logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
@@ -24,5 +23,6 @@ workers = 4
 threads = 2
 worker_class = "gthread"
 timeout = 120
+loglevel = 'debug'
 
-logger.info(f"Gunicorn configuration: bind={bind}, workers={workers}, threads={threads}, worker_class={worker_class}, timeout={timeout}")
+logger.info(f"Gunicorn configuration: bind={bind}, workers={workers}, threads={threads}, worker_class={worker_class}, timeout={timeout}, loglevel={loglevel}")

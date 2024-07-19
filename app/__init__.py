@@ -12,12 +12,13 @@ from .celery import make_celery, celery
 import redis
 import secrets
 from functools import wraps
+import multiprocessing
+import asyncio
+from app.twitch_api import TwitchAPI, setup_twitch, setup_eventsub
 
-# Logging setup
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Initialize extensions
 db = SQLAlchemy()
 bcrypt = Bcrypt()
 login_manager = LoginManager()
@@ -43,26 +44,29 @@ def csrf_protect():
     return decorator
 
 def create_app():
+    print("Starting create_app function")
     app = Flask(__name__)
     app.config.from_object('config.Config')
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
 
-    # Initialize extensions with app
     db.init_app(app)
     bcrypt.init_app(app)
     login_manager.init_app(app)
     migrate.init_app(app, db)
 
-    # Session configuration
     app.config['SESSION_TYPE'] = 'redis'
     app.config['SESSION_REDIS'] = redis.Redis.from_url(app.config['REDIS_URL'])
     Session(app)
+
+    celery.conf.update(app.config)
 
     @app.context_processor
     def inject_csrf_token():
         return dict(csrf_token=generate_csrf_token())
 
-    # Register blueprints
+    with app.app_context():
+        init_twitch()
+
     from app.auth import auth as auth_blueprint
     app.register_blueprint(auth_blueprint, url_prefix='/auth')
     from app.main import main as main_blueprint
@@ -71,7 +75,41 @@ def create_app():
     logger.info("Application initialization complete")
     return app
 
-if __name__ == "__main__":
-    app = create_app()
-    app.logger.info("Starting Flask application")
+def init_twitch():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(setup_twitch_and_eventsub())
+
+async def setup_twitch_and_eventsub():
+    from flask import current_app
+    twitch_instance = await setup_twitch(current_app)
+    if twitch_instance:
+        eventsub_instance = await setup_eventsub(current_app, twitch_instance)
+        if eventsub_instance:
+            current_app.config['TWITCH_API'] = TwitchAPI(twitch_instance, eventsub_instance)
+            current_app.logger.info("Twitch API and EventSub initialized successfully")
+        else:
+            current_app.logger.error("Failed to initialize EventSub")
+    else:
+        current_app.logger.error("Failed to initialize Twitch API")
+
+def run_celery():
+    celery.start()
+
+def run_flask(app):
     app.run(host='0.0.0.0', port=8000)
+
+def start_application():
+    app = create_app()
+    app.app_context().push()
+
+    if os.environ.get('CELERY_WORKER'):
+        run_celery()
+    else:
+        celery_process = multiprocessing.Process(target=run_celery)
+        celery_process.start()
+        run_flask(app)
+        celery_process.join()
+
+if __name__ == "__main__":
+    start_application()

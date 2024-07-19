@@ -15,9 +15,6 @@ COPY ./entrypoint.sh /usr/src/app/entrypoint.sh
 RUN chmod +x /usr/src/app/entrypoint.sh && \
     sed -i 's/\r$//' /usr/src/app/entrypoint.sh
 
-RUN ls -la /usr/src/app/entrypoint.sh
-
-
 RUN adduser -D appuser && \
     chown -R appuser:appuser /usr/src/app /recordings
 
@@ -26,3 +23,5 @@ USER appuser
 EXPOSE 8000 8080
 
 ENTRYPOINT ["/bin/sh", "-c", "/usr/src/app/entrypoint.sh"]
+
+

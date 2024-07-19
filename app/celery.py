@@ -1,4 +1,5 @@
 from celery import Celery
+from config import Config
 
 def make_celery(app):
     celery = Celery(
@@ -17,3 +18,4 @@ def make_celery(app):
     return celery
 
 celery = Celery(__name__)
+celery.config_from_object(Config)

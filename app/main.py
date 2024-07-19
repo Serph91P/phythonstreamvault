@@ -3,12 +3,10 @@ from flask import Blueprint, render_template, request, redirect, url_for, flash,
 from flask_login import login_required, current_user
 from app import db
 from app.models import Streamer, User, Stream
-from app.twitch_api import init_twitch_api
 from app.tasks import add_streamer_task, resubscribe_all_streamers
 import redis
 from sqlalchemy.exc import SQLAlchemyError
 import pika
-from twitchAPI.twitch import Twitch
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -52,7 +50,6 @@ def health_check():
         }
     }
 
-    # Check database connection
     try:
         logger.info("Checking database connection")
         db.session.execute('SELECT 1')
@@ -62,7 +59,6 @@ def health_check():
         health_status["checks"]["database"] = "error"
         health_status["status"] = "degraded"
 
-    # Check Redis connection
     try:
         logger.info("Checking Redis connection")
         redis_client = redis.from_url(current_app.config['CELERY_RESULT_BACKEND'])
@@ -73,7 +69,6 @@ def health_check():
         health_status["checks"]["redis"] = "error"
         health_status["status"] = "degraded"
 
-    # Check RabbitMQ connection
     try:
         logger.info("Checking RabbitMQ connection")
         params = pika.URLParameters(current_app.config['CELERY_BROKER_URL'])
@@ -85,17 +80,15 @@ def health_check():
         health_status["checks"]["rabbitmq"] = "error"
         health_status["status"] = "degraded"
 
-    # Check Twitch API connection
-    twitch = current_app.config.get('TWITCH_API')
-    if twitch is None:
+    twitch_api = current_app.config.get('TWITCH_API')
+    if twitch_api is None:
         logger.error("Twitch API not initialized")
         health_status["checks"]["twitch_api"] = "error"
         health_status["status"] = "degraded"
     else:
         try:
             logger.info("Checking Twitch API connection")
-            # Perform a simple API call to verify the connection
-            twitch.get_users(logins=['twitch'])
+            twitch_api.twitch.get_users(logins=['twitch'])
             logger.info("Twitch API connection successful")
         except Exception as e:
             logger.error(f"Twitch API health check failed: {str(e)}")
@@ -107,7 +100,7 @@ def health_check():
         return jsonify(health_status), 200
     else:
         logger.warning(f"Health check degraded: {health_status}")
-        return jsonify(health_status), 200  # Return 200 even if degraded
+        return jsonify(health_status), 200
 
 @main.route('/add_streamer', methods=['POST'])
 @login_required
@@ -123,6 +116,7 @@ def add_streamer():
 @login_required
 def task_status(task_id):
     task = add_streamer_task.AsyncResult(task_id)
+    current_app.logger.info(f"Task status for {task_id}: {task.state}")
     if task.state == 'PENDING':
         response = {
             'state': task.state,
@@ -148,7 +142,9 @@ def manage_subscriptions_page():
 @main.route('/api/list_subscriptions')
 @login_required
 def list_subscriptions():
-    twitch_api = current_app.config['TWITCH_API']
+    twitch_api = current_app.config.get('TWITCH_API')
+    if not twitch_api:
+        return jsonify({'error': 'Twitch API not initialized'}), 500
     subscriptions = twitch_api.get_eventsub_subscriptions()
     return jsonify(subscriptions)
 
@@ -190,3 +186,4 @@ def init_app(app):
     logger.debug("Initializing main Blueprint")
     app.register_blueprint(main)
     logger.debug("Main Blueprint registered")
+

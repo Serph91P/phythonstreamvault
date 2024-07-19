@@ -14,3 +14,4 @@ email_validator
 twitchAPI
 tenacity
 pika
+psycopg2-binary
