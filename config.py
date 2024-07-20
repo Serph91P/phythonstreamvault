@@ -13,10 +13,17 @@ class Config:
     SERVER_NAME = BASE_URL.replace('https://', '').replace('http://', '')
     CALLBACK_URL = f"{BASE_URL}/webhook/callback"
 
+    # PostgreSQL configuration
+    POSTGRES_USER = 'postgres'
+    POSTGRES_PASSWORD = 'postgres'
+    POSTGRES_DB = 'postgres'
+    POSTGRES_HOST = 'streamvault_db'
+    POSTGRES_PORT = '5432'
+
     # Fixed settings
     CELERY_BROKER_URL = 'amqp://user:password@streamvault_rabbit:5672/'
     CELERY_RESULT_BACKEND = 'redis://streamvault_redis:6379/0'
-    SQLALCHEMY_DATABASE_URI = 'postgresql://postgres:postgres@db:5432/postgres'
+    SQLALCHEMY_DATABASE_URI = f'postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}'
     
     # Other configurations
     SQLALCHEMY_TRACK_MODIFICATIONS = False
