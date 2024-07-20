@@ -2,7 +2,6 @@ import os
 import logging
 from flask import Flask, render_template, request, session, abort
 from flask_migrate import Migrate
-import flask_migrate
 from flask_session import Session
 from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_sqlalchemy import SQLAlchemy
@@ -26,25 +25,8 @@ login_manager.login_view = 'auth.login'
 login_manager.login_message = 'Please log in to access this page.'
 migrate = Migrate()
 
-def generate_csrf_token():
-    if 'csrf_token' not in session:
-        session['csrf_token'] = secrets.token_hex(32)
-    return session['csrf_token']
-
-def csrf_protect():
-    def decorator(f):
-        @wraps(f)
-        def decorated_function(*args, **kwargs):
-            if request.method == "POST":
-                token = session.get('csrf_token')
-                if not token or token != request.form.get('csrf_token'):
-                    abort(403)
-            return f(*args, **kwargs)
-        return decorated_function
-    return decorator
-
 def create_app():
-    print("Starting create_app function")
+    logger.info("Starting create_app function")
     app = Flask(__name__)
     app.config.from_object('config.Config')
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
@@ -92,6 +74,23 @@ async def setup_twitch_and_eventsub():
             current_app.logger.error("Failed to initialize EventSub")
     else:
         current_app.logger.error("Failed to initialize Twitch API")
+
+def generate_csrf_token():
+    if 'csrf_token' not in session:
+        session['csrf_token'] = secrets.token_hex(32)
+    return session['csrf_token']
+
+def csrf_protect():
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if request.method == "POST":
+                token = session.get('csrf_token')
+                if not token or token != request.form.get('csrf_token'):
+                    abort(403)
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
 
 def run_celery():
     celery.start()
