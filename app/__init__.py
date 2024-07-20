@@ -1,6 +1,7 @@
 import os
 import logging
-from flask import Flask
+from flask import Flask, abort, request, session
+from functools import wraps
 from flask_migrate import Migrate
 from flask_session import Session
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -19,6 +20,18 @@ login_manager = LoginManager()
 login_manager.login_view = 'auth.login'
 login_manager.login_message = 'Please log in to access this page.'
 migrate = Migrate()
+
+def csrf_protect():
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if request.method == "POST":
+                token = session.get('csrf_token')
+                if not token or token != request.form.get('csrf_token'):
+                    abort(403)
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
 
 def create_app():
     logger.info("Starting create_app function")
@@ -42,8 +55,7 @@ def create_app():
     from app.main import main as main_blueprint
     app.register_blueprint(main_blueprint)
 
-    @app.before_first_request
-    def initialize_twitch_and_eventsub():
+    with app.app_context():
         from app.twitch_api import TwitchAPI, setup_twitch, setup_eventsub
         twitch_instance = setup_twitch(app)
         if twitch_instance:
@@ -58,3 +70,4 @@ def create_app():
 
     logger.info("Application initialization complete")
     return app
+
