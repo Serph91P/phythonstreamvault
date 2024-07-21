@@ -1,6 +1,9 @@
 import os
 import logging
+import secrets
+from config import Config
 from flask import Flask, abort, request, session
+from app.auth import auth as auth_blueprint
 from functools import wraps
 from flask_migrate import Migrate
 from flask_session import Session
@@ -21,6 +24,11 @@ login_manager.login_view = 'auth.login'
 login_manager.login_message = 'Please log in to access this page.'
 migrate = Migrate()
 
+def generate_csrf_token():
+    if 'csrf_token' not in session:
+        session['csrf_token'] = secrets.token_hex(32)
+    return session['csrf_token']
+
 def csrf_protect():
     def decorator(f):
         @wraps(f)
@@ -33,10 +41,13 @@ def csrf_protect():
         return decorated_function
     return decorator
 
+
 def create_app():
     logger.info("Starting create_app function")
     app = Flask(__name__)
     app.config.from_object('config.Config')
+    app.register_blueprint(auth_blueprint, url_prefix='/auth')
+    app.config['SERVER_NAME'] = app.config['BASE_URL'].replace('https://', '').replace('http://', '')
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
 
     db.init_app(app)
@@ -46,6 +57,7 @@ def create_app():
 
     app.config['SESSION_TYPE'] = 'redis'
     app.config['SESSION_REDIS'] = redis.Redis.from_url(app.config['REDIS_URL'])
+    app.config['WTF_CSRF_ENABLED'] = True
     Session(app)
 
     celery.conf.update(app.config)

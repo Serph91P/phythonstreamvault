@@ -182,6 +182,11 @@ def resubscribe_status(task_id):
         }
     return jsonify(response)
 
+@main.app_errorhandler(404)
+def not_found_error(error):
+    return render_template('404.html'), 404
+
+
 def init_app(app):
     logger.debug("Initializing main Blueprint")
     app.register_blueprint(main)

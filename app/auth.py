@@ -3,6 +3,16 @@ from app import db, bcrypt, csrf_protect
 from app.forms import LoginForm, SetupForm
 from app.models import User
 from flask_login import login_user, logout_user, login_required, current_user
+from flask_wtf import FlaskForm
+from wtforms import StringField, PasswordField, SubmitField
+from wtforms.validators import DataRequired, Email, Length
+
+class SetupForm(FlaskForm):
+    username = StringField('Username', validators=[DataRequired(), Length(min=2, max=20)])
+    email = StringField('Email', validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[DataRequired()])
+    submit = SubmitField('Set Up')
+
 
 auth = Blueprint('auth', __name__)
 
