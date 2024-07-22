@@ -191,4 +191,3 @@ def init_app(app):
     logger.debug("Initializing main Blueprint")
     app.register_blueprint(main)
     logger.debug("Main Blueprint registered")
-

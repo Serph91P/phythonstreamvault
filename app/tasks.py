@@ -1,9 +1,9 @@
-from app import db
+from app import celery, db
 from app.models import Streamer, Stream
 from flask import current_app
 from twitchAPI.object.eventsub import StreamOnlineEvent, StreamOfflineEvent, ChannelUpdateEvent
 
-
+@celery.task
 def add_streamer_task(username, user_id):
     current_app.logger.info(f"Starting add_streamer_task for {username}")
     twitch = current_app.config['TWITCH_API']
@@ -31,7 +31,8 @@ def add_streamer_task(username, user_id):
         current_app.logger.error(f"Error adding streamer {username}: {str(e)}")
         db.session.rollback()
         return {'status': 'error', 'message': str(e)}
-
+    
+@celery.task
 def resubscribe_all_streamers():
     current_app.logger.info("Starting resubscribe_all_streamers task")
     twitch = current_app.config['TWITCH_API']

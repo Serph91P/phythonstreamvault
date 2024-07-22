@@ -5,26 +5,25 @@
     <div class="col-lg-5">
         <h2 class="mt-4">Create Admin Account</h2>
         <form method="POST">
-            {{ form.hidden_tag() }}
-            <!-- {{ form.hidden_tag() }} -->
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <div class="form-group">
-                {{ form.username.label(class="form-control-label") }}
-                {{ form.username(class="form-control") }}
+                <label for="username">Username</label>
+                <input type="text" class="form-control" id="username" name="username" required>
             </div>
             <div class="form-group">
-                {{ form.email.label(class="form-control-label") }}
-                {{ form.email(class="form-control") }}
+                <label for="email">Email</label>
+                <input type="email" class="form-control" id="email" name="email" required>
             </div>
             <div class="form-group">
-                {{ form.password.label(class="form-control-label") }}
-                {{ form.password(class="form-control") }}
+                <label for="password">Password</label>
+                <input type="password" class="form-control" id="password" name="password" required>
             </div>
             <div class="form-group">
-                {{ form.confirm_password.label(class="form-control-label") }}
-                {{ form.confirm_password(class="form-control") }}
+                <label for="confirm_password">Confirm Password</label>
+                <input type="password" class="form-control" id="confirm_password" name="confirm_password" required>
             </div>
             <div class="form-group">
-                {{ form.submit(class="btn btn-primary") }}
+                <button type="submit" class="btn btn-primary">Set Up</button>
             </div>
         </form>
     </div>

@@ -34,6 +34,13 @@ class Config:
     REDIS_URL = 'redis://streamvault_redis:6379/0'
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'your-secret-key'
 
+    # Session configurations
+    SESSION_TYPE = 'redis'
+    SESSION_PERMANENT = False
+    SESSION_USE_SIGNER = True
+    SESSION_KEY_PREFIX = 'streamvault:'
+    SESSION_COOKIE_NAME = 'streamvault_session'
+
     @classmethod
     def get_eventsub_webhook_port(cls):
         return int(os.environ.get('EVENTSUB_WEBHOOK_PORT', 8080))
