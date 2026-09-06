@@ -494,6 +494,10 @@ class ProcessManager:
         quality: str,
         segment_info: Dict,
         token_resolution=_UNRESOLVED_RECORDING_TOKEN,
+        _monitor_handoff: bool = False,
+        _handoff_owner=None,
+        _proxy_settings=_UNRESOLVED_RECORDING_TOKEN,
+        _supported_codecs=_UNRESOLVED_RECORDING_TOKEN,
     ) -> Optional[asyncio.subprocess.Process]:
         """Start recording a single segment"""
         try:
@@ -541,7 +545,8 @@ class ProcessManager:
 
                 # Check if proxy system is enabled
                 if (
-                    recording_settings
+                    not _monitor_handoff
+                    and recording_settings
                     and hasattr(recording_settings, "enable_proxy")
                     and recording_settings.enable_proxy
                 ):
@@ -586,7 +591,7 @@ class ProcessManager:
                     logger.info(
                         "ℹ️ Proxy system disabled - checking stored proxy settings"
                     )
-                    use_stored_proxy = True
+                    use_stored_proxy = not _monitor_handoff
 
             # Get codec preferences (H.265/AV1 support - Streamlink 8.0.0+)
             # Priority: Streamer-specific > Global default
@@ -652,6 +657,11 @@ class ProcessManager:
                             f"🎨 Using global codec preference: {supported_codecs}"
                         )
 
+            if _proxy_settings is not _UNRESOLVED_RECORDING_TOKEN:
+                proxy_settings = _proxy_settings
+            if _supported_codecs is not _UNRESOLVED_RECORDING_TOKEN:
+                supported_codecs = _supported_codecs
+
             # NOTE: Proxy connectivity is now handled by ProxyHealthService
             # The health check system continuously monitors proxy status and only
             # returns healthy proxies. No need for manual connectivity check here.
@@ -664,7 +674,7 @@ class ProcessManager:
             # Credentials and proxy selection stay process-local on the CLI.
             # Codec CLI parameters override the static config for this streamer.
             anonymous = oauth_token is None
-            if anonymous:
+            if anonymous and not _monitor_handoff:
                 logger.warning(
                     "TWITCH_AUTH_FALLBACK_TO_H264 reason=%s source=%s attempt=1",
                     getattr(token_resolution, "reason", "credential_unavailable"),
@@ -738,7 +748,7 @@ class ProcessManager:
             )
             process_identity = None
             fallback_attempted = False
-            fallback_owner = None
+            fallback_owner = _handoff_owner
 
             while True:
                 if fallback_owner is not None:
@@ -818,6 +828,22 @@ class ProcessManager:
                 else:
                     await self._wait_for_auth_startup(process, segment_path)
                 if process.returncode is None:
+                    if not anonymous and not self._segment_has_recording_data(
+                        segment_path
+                    ):
+                        # The completion monitor owns no-byte auth failures that
+                        # arrive after this bounded startup observation.
+                        segment_info["auth_startup_handoff"] = {
+                            "process": process,
+                            "stream": stream,
+                            "quality": quality,
+                            "stored_version": getattr(
+                                token_resolution, "stored_version", None
+                            ),
+                            "source": getattr(token_resolution, "source", None),
+                            "proxy_settings": proxy_settings,
+                            "supported_codecs": supported_codecs,
+                        }
                     break
 
                 stdout, stderr = await process.communicate()
@@ -856,6 +882,11 @@ class ProcessManager:
                         )
 
                 self._release_streamlink_output_secrets(process)
+                if (
+                    segment_info.get("auth_startup_handoff", {}).get("process")
+                    is process
+                ):
+                    segment_info.pop("auth_startup_handoff", None)
                 segment_has_data = self._segment_has_recording_data(segment_path)
 
                 should_fallback = (
@@ -962,15 +993,30 @@ class ProcessManager:
                 )
                 segment_info["upstream_activated"] = True
 
-            # Add segment to the list
-            segment_info["total_segments"].append(
-                {
-                    "path": segment_path,
-                    "start_time": datetime.now(),
-                    "process_pid": process.pid,
-                }
-            )
-            self._track_segment_completion(process)
+            # A monitor-owned retry replaces the process for this segment rather
+            # than adding another segment or completion monitor.
+            if _monitor_handoff:
+                for segment in reversed(segment_info["total_segments"]):
+                    if segment["path"] == segment_path:
+                        segment["process_pid"] = process.pid
+                        break
+                else:
+                    segment_info["total_segments"].append(
+                        {
+                            "path": segment_path,
+                            "start_time": datetime.now(),
+                            "process_pid": process.pid,
+                        }
+                    )
+            else:
+                segment_info["total_segments"].append(
+                    {
+                        "path": segment_path,
+                        "start_time": datetime.now(),
+                        "process_pid": process.pid,
+                    }
+                )
+                self._track_segment_completion(process)
 
             # Register process with ProcessMonitor - temporarily disabled
             # if process_monitor and ProcessType:
@@ -991,6 +1037,9 @@ class ProcessManager:
             logger.info(
                 f"Started segment recording for stream {stream.id} with PID {process.pid}"
             )
+
+            if _monitor_handoff:
+                return process
 
             # Send Apprise notification for recording_started (NEW)
             try:
@@ -1405,6 +1454,84 @@ class ProcessManager:
                     process.returncode,
                     known_secrets=known_secrets,
                 )
+
+            startup_handoff = (
+                segment_info.get("auth_startup_handoff") if segment_info else None
+            )
+            should_retry_anonymously = (
+                startup_handoff is not None
+                and startup_handoff["process"] is process
+                and process.returncode is not None
+                and not self._segment_has_recording_data(
+                    segment_info["current_segment_path"]
+                )
+                and is_twitch_auth_rejection(
+                    "\n".join(
+                        (
+                            sanitize_streamlink_output(stdout, known_secrets),
+                            sanitize_streamlink_output(stderr, known_secrets),
+                        )
+                    )
+                )
+            )
+
+            if should_retry_anonymously:
+                rotation_locks = getattr(self, "rotation_locks", None)
+                if rotation_locks is None:
+                    rotation_locks = self.rotation_locks = {}
+                rotation_lock = rotation_locks.setdefault(process_id, asyncio.Lock())
+
+                async with rotation_lock:
+                    async with self.lock:
+                        if (
+                            self.active_processes.get(process_id) is not process
+                            or self.long_stream_processes.get(process_id)
+                            is not segment_info
+                        ):
+                            return process.returncode or 0
+                    segment_info.pop("auth_startup_handoff", None)
+                    segment_info["auth_fallback_to_anonymous"] = True
+                    stored_version = startup_handoff["stored_version"]
+                    if stored_version is not None:
+                        try:
+                            from app.database import SessionLocal
+                            from app.services.system.twitch_token_service import (
+                                TwitchTokenService,
+                            )
+
+                            with SessionLocal() as db:
+                                TwitchTokenService(db).invalidate_recording_token(
+                                    stored_version
+                                )
+                        except Exception:
+                            logger.warning(
+                                "Could not invalidate runtime-rejected Twitch token"
+                            )
+                    if segment_info.get("upstream_channel_key"):
+                        await self._replace_startup_reservation_with_anonymous(
+                            segment_info
+                        )
+                    self._release_streamlink_output_secrets(process)
+                    logger.warning(
+                        "TWITCH_AUTH_FALLBACK_TO_H264 "
+                        "reason=streamlink_auth_rejection source=%s attempt=2",
+                        startup_handoff["source"] or "unknown",
+                    )
+                    replacement = await self._start_segment(
+                        startup_handoff["stream"],
+                        segment_info["current_segment_path"],
+                        startup_handoff["quality"],
+                        segment_info,
+                        token_resolution=None,
+                        _monitor_handoff=True,
+                        _handoff_owner=process,
+                        _proxy_settings=startup_handoff["proxy_settings"],
+                        _supported_codecs=startup_handoff["supported_codecs"],
+                    )
+                if replacement is None:
+                    raise ProcessError("Anonymous recording replacement did not start")
+                # The replacement's completion needs the same rotation lock.
+                return await self.monitor_process(replacement)
 
             # Handle segmented vs normal recording completion
             if segment_info:

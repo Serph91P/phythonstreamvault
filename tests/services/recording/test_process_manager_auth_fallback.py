@@ -55,6 +55,19 @@ class _Process:
         return b"", self.stderr_value
 
 
+class _DelayedProcess(_Process):
+    def __init__(self, pid, returncode=None, stderr=b""):
+        super().__init__(pid, returncode, stderr)
+        self.exited = asyncio.Event()
+        if returncode is not None:
+            self.exited.set()
+
+    async def communicate(self):
+        self.communicate_calls += 1
+        await self.exited.wait()
+        return b"", self.stderr_value
+
+
 def _install_start_environment(
     monkeypatch,
     tmp_path: Path,
@@ -137,9 +150,11 @@ def _install_start_environment(
 
     tracked = []
     manager._track_segment_completion = tracked.append
+    notifications = []
 
     class _Notifications:
         async def send_recording_notification(self, **_kwargs):
+            notifications.append(_kwargs)
             return None
 
     monkeypatch.setattr("app.database.SessionLocal", _Session)
@@ -183,6 +198,7 @@ def _install_start_environment(
         invalidations=invalidations,
         stored_version=stored_version,
         tracked=tracked,
+        notifications=notifications,
         pending_processes=pending_processes,
     )
 
@@ -452,6 +468,168 @@ async def test_delayed_startup_auth_exit_still_falls_back(monkeypatch, tmp_path)
     assert process is replacement
     assert len(fixture.commands) == 2
     assert fixture.commands[1]["anonymous"] is True
+
+
+@pytest.mark.asyncio
+async def test_auth_exit_after_startup_window_retries_anonymously(
+    monkeypatch, tmp_path, caplog
+):
+    rejected = _DelayedProcess(101, stderr=b"401 Unauthorized")
+    replacement = _DelayedProcess(102)
+    fixture = _install_start_environment(monkeypatch, tmp_path, [rejected, replacement])
+    fixture.manager.AUTH_STARTUP_FALLBACK_WINDOW_SECONDS = 0.01
+    fixture.manager.AUTH_STARTUP_POLL_SECONDS = 0.001
+    fixture.manager._track_segment_completion = (
+        ProcessManager._track_segment_completion.__get__(fixture.manager)
+    )
+    fixture.segment_info.update(
+        current_segment_path=fixture.segment_path,
+        monitor_task=None,
+    )
+
+    async def _finalize(_segment_info):
+        return None
+
+    fixture.manager._finalize_segmented_recording = _finalize
+
+    async def _reject_after_startup_window():
+        await asyncio.sleep(0.02)
+        rejected.returncode = 1
+        rejected.exited.set()
+
+    rejection_task = asyncio.create_task(_reject_after_startup_window())
+    process = await fixture.manager._start_segment(
+        fixture.stream,
+        fixture.segment_path,
+        "best",
+        fixture.segment_info,
+    )
+    assert process is rejected
+    assert rejected.returncode is None
+    await rejection_task
+    for _ in range(20):
+        if (
+            fixture.manager.active_processes.get("stream_7") is replacement
+            and fixture.segment_info["total_segments"][0]["process_pid"]
+            == replacement.pid
+        ):
+            break
+        await asyncio.sleep(0.01)
+
+    assert len(fixture.commands) == 2
+    assert fixture.commands[1]["anonymous"] is True
+    assert fixture.commands[1]["oauth_token"] is None
+    assert (
+        fixture.commands[1]["proxy_settings"] == fixture.commands[0]["proxy_settings"]
+    )
+    assert fixture.commands[1]["output_path"] == fixture.commands[0]["output_path"]
+    assert sum("TWITCH_AUTH_FALLBACK_TO_H264" in r.message for r in caplog.records) == 1
+    assert fixture.manager.active_processes == {"stream_7": replacement}
+    assert fixture.segment_info["total_segments"] == [
+        {
+            "path": fixture.segment_path,
+            "start_time": fixture.segment_info["total_segments"][0]["start_time"],
+            "process_pid": replacement.pid,
+        }
+    ]
+    assert fixture.invalidations == [fixture.stored_version]
+    assert len(fixture.notifications) == 1
+
+    monitor_task = fixture.manager._segment_completion_tasks[rejected]
+    monitor_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await monitor_task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stderr", "segment_data", "owner_lost"),
+    [
+        (b"No space left on device", None, False),
+        (b"401 Unauthorized", b"segment-data", False),
+        (b"401 Unauthorized", None, True),
+    ],
+)
+async def test_late_startup_failure_without_auth_evidence_does_not_retry(
+    monkeypatch, tmp_path, stderr, segment_data, owner_lost
+):
+    failed = _DelayedProcess(101, stderr=stderr)
+    fixture = _install_start_environment(monkeypatch, tmp_path, [failed])
+    fixture.manager.AUTH_STARTUP_FALLBACK_WINDOW_SECONDS = 0.01
+    fixture.manager.AUTH_STARTUP_POLL_SECONDS = 0.001
+    fixture.manager._track_segment_completion = (
+        ProcessManager._track_segment_completion.__get__(fixture.manager)
+    )
+    fixture.segment_info.update(
+        current_segment_path=fixture.segment_path,
+        monitor_task=None,
+    )
+
+    async def _finalize(_segment_info):
+        return None
+
+    fixture.manager._finalize_segmented_recording = _finalize
+
+    assert (
+        await fixture.manager._start_segment(
+            fixture.stream, fixture.segment_path, "best", fixture.segment_info
+        )
+        is failed
+    )
+    monitor_task = fixture.manager._segment_completion_tasks[failed]
+    await asyncio.sleep(0)
+    if owner_lost:
+        fixture.manager.active_processes.pop("stream_7")
+    if segment_data:
+        Path(fixture.segment_path).write_bytes(segment_data)
+    failed.returncode = 1
+    failed.exited.set()
+    await asyncio.wait_for(monitor_task, timeout=1)
+
+    assert len(fixture.commands) == 1
+    assert fixture.invalidations == []
+
+
+@pytest.mark.asyncio
+async def test_late_anonymous_replacement_never_retries_a_second_auth_exit(
+    monkeypatch, tmp_path
+):
+    rejected = _DelayedProcess(101, stderr=b"401 Unauthorized")
+    replacement = _DelayedProcess(102, stderr=b"401 Unauthorized")
+    fixture = _install_start_environment(monkeypatch, tmp_path, [rejected, replacement])
+    fixture.manager.AUTH_STARTUP_FALLBACK_WINDOW_SECONDS = 0.01
+    fixture.manager.AUTH_STARTUP_POLL_SECONDS = 0.001
+    fixture.manager._track_segment_completion = (
+        ProcessManager._track_segment_completion.__get__(fixture.manager)
+    )
+    fixture.segment_info.update(
+        current_segment_path=fixture.segment_path,
+        monitor_task=None,
+    )
+
+    async def _finalize(_segment_info):
+        return None
+
+    fixture.manager._finalize_segmented_recording = _finalize
+    assert (
+        await fixture.manager._start_segment(
+            fixture.stream, fixture.segment_path, "best", fixture.segment_info
+        )
+        is rejected
+    )
+    monitor_task = fixture.manager._segment_completion_tasks[rejected]
+    rejected.returncode = 1
+    rejected.exited.set()
+    for _ in range(20):
+        if fixture.manager.active_processes.get("stream_7") is replacement:
+            break
+        await asyncio.sleep(0.01)
+    replacement.returncode = 1
+    replacement.exited.set()
+    await asyncio.wait_for(monitor_task, timeout=1)
+
+    assert len(fixture.commands) == 2
+    assert fixture.pending_processes == []
 
 
 @pytest.mark.asyncio
