@@ -25,6 +25,7 @@ Security:
 import logging
 import asyncio
 import aiohttp
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -33,6 +34,30 @@ from app.config.settings import get_settings
 from app.utils.proxy_encryption import ProxyEncryption
 
 logger = logging.getLogger("streamvault")
+
+
+@dataclass(frozen=True)
+class RecordingStoredTokenVersion:
+    """Database token identity used for compare-and-set invalidation."""
+
+    settings_id: Optional[int]
+    encrypted_token: str = field(repr=False)
+    encrypted_refresh_token: Optional[str] = field(repr=False)
+    expires_at: Optional[datetime]
+
+
+@dataclass(frozen=True)
+class RecordingTokenResolution:
+    """Result of resolving and live-validating recording authentication."""
+
+    token: Optional[str] = field(repr=False)
+    source: Optional[str]
+    live_valid: bool
+    definitive_invalid: bool
+    reason: str
+    stored_version: Optional[RecordingStoredTokenVersion] = field(
+        default=None, repr=False
+    )
 
 
 class TwitchTokenService:
@@ -52,6 +77,9 @@ class TwitchTokenService:
     # token but does not include a usable expires_in value.
     DEFAULT_MANUAL_TOKEN_EXPIRES_IN_SECONDS = 60 * 24 * 3600
 
+    RECORDING_VALIDATION_TIMEOUT_SECONDS = 3.0
+    RECORDING_INVALIDATED_TOKEN_EXPIRY = datetime(1970, 1, 1)
+
     # Global lock for token refresh (prevents duplicate refreshes)
     _refresh_lock = asyncio.Lock()
     _last_expiry_notification_at: Optional[datetime] = None
@@ -60,6 +88,184 @@ class TwitchTokenService:
         self.db = db
         self.settings = get_settings()
         self.encryption = ProxyEncryption()
+
+    async def resolve_recording_token(self) -> RecordingTokenResolution:
+        """Resolve one candidate and live-validate it before recording."""
+        source = None
+        try:
+            async with asyncio.timeout(self.RECORDING_VALIDATION_TIMEOUT_SECONDS):
+                global_settings = self.db.query(GlobalSettings).first()
+                token = None
+                stored_version = None
+
+                if (
+                    global_settings
+                    and global_settings.twitch_access_token
+                    and not global_settings.twitch_refresh_token
+                    and self._is_token_valid(global_settings)
+                ):
+                    source = "database_manual"
+                    token = self.encryption.decrypt(global_settings.twitch_access_token)
+                    stored_version = self._stored_token_version(global_settings)
+                elif self.settings.TWITCH_OAUTH_TOKEN:
+                    source = "environment"
+                    token = self.settings.TWITCH_OAUTH_TOKEN.strip()
+                elif global_settings and global_settings.twitch_refresh_token:
+                    if self._is_token_valid(global_settings):
+                        source = "database_oauth"
+                        if global_settings.twitch_access_token:
+                            token = self.encryption.decrypt(
+                                global_settings.twitch_access_token
+                            )
+                    else:
+                        async with self._refresh_lock:
+                            self.db.refresh(global_settings)
+                            if self._is_token_valid(global_settings):
+                                source = "database_oauth"
+                                if global_settings.twitch_access_token:
+                                    token = self.encryption.decrypt(
+                                        global_settings.twitch_access_token
+                                    )
+                            else:
+                                source = "oauth_refresh"
+                                token = await self._refresh_access_token(
+                                    global_settings
+                                )
+                    if token and global_settings.twitch_access_token:
+                        stored_version = self._stored_token_version(global_settings)
+
+                if not token:
+                    return RecordingTokenResolution(
+                        token=None,
+                        source=source,
+                        live_valid=False,
+                        definitive_invalid=False,
+                        reason="credential_unavailable",
+                        stored_version=stored_version,
+                    )
+
+                validation = await self._validate_recording_token(token)
+                if validation == "valid":
+                    return RecordingTokenResolution(
+                        token=token,
+                        source=source,
+                        live_valid=True,
+                        definitive_invalid=False,
+                        reason="validated",
+                        stored_version=stored_version,
+                    )
+                if validation == "invalid":
+                    if stored_version is not None:
+                        self.invalidate_recording_token(stored_version)
+                    return RecordingTokenResolution(
+                        token=None,
+                        source=source,
+                        live_valid=False,
+                        definitive_invalid=True,
+                        reason="validation_invalid",
+                        stored_version=stored_version,
+                    )
+                return RecordingTokenResolution(
+                    token=None,
+                    source=source,
+                    live_valid=False,
+                    definitive_invalid=False,
+                    reason="validation_transient",
+                    stored_version=stored_version,
+                )
+        except TimeoutError:
+            logger.warning("Twitch recording token validation timed out")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Twitch recording token validation failed transiently")
+
+        return RecordingTokenResolution(
+            token=None,
+            source=source,
+            live_valid=False,
+            definitive_invalid=False,
+            reason="validation_transient",
+        )
+
+    def _stored_token_version(
+        self, global_settings: GlobalSettings
+    ) -> RecordingStoredTokenVersion:
+        return RecordingStoredTokenVersion(
+            settings_id=getattr(global_settings, "id", None),
+            encrypted_token=global_settings.twitch_access_token,
+            encrypted_refresh_token=global_settings.twitch_refresh_token,
+            expires_at=global_settings.twitch_token_expires_at,
+        )
+
+    async def _validate_recording_token(self, access_token: str) -> str:
+        """Classify one Twitch validation response without retries."""
+        timeout = aiohttp.ClientTimeout(total=self.RECORDING_VALIDATION_TIMEOUT_SECONDS)
+        headers = {"Authorization": f"OAuth {access_token}"}
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(
+                    self.VALIDATE_URL,
+                    headers=headers,
+                    allow_redirects=False,
+                ) as response:
+                    if response.status in (401, 403):
+                        return "invalid"
+                    if response.status != 200:
+                        return "transient"
+                    payload = await response.json()
+                    expires_in = (
+                        payload.get("expires_in") if isinstance(payload, dict) else None
+                    )
+                    if (
+                        not isinstance(payload, dict)
+                        or not isinstance(payload.get("client_id"), str)
+                        or not payload["client_id"].strip()
+                        or not isinstance(expires_in, int)
+                        or isinstance(expires_in, bool)
+                        or expires_in < 0
+                    ):
+                        return "transient"
+                    return "valid"
+        except asyncio.CancelledError:
+            raise
+        except (TimeoutError, aiohttp.ClientError, ValueError, TypeError):
+            return "transient"
+        except Exception:
+            return "transient"
+
+    def invalidate_recording_token(self, version: RecordingStoredTokenVersion) -> bool:
+        """Expire a DB token only when its credential and expiry are unchanged."""
+        conditions = [
+            GlobalSettings.twitch_access_token == version.encrypted_token,
+            GlobalSettings.twitch_token_expires_at == version.expires_at,
+            GlobalSettings.twitch_refresh_token == version.encrypted_refresh_token,
+        ]
+        if version.settings_id is not None:
+            conditions.append(GlobalSettings.id == version.settings_id)
+
+        try:
+            updated = (
+                self.db.query(GlobalSettings)
+                .filter(*conditions)
+                .update(
+                    {
+                        GlobalSettings.twitch_token_expires_at: self.RECORDING_INVALIDATED_TOKEN_EXPIRY
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if updated == 1:
+                self.db.commit()
+                logger.warning("Stored Twitch token was invalidated")
+                return True
+            self.db.rollback()
+            logger.info("Skipped invalidating a concurrently replaced Twitch token")
+            return False
+        except Exception:
+            self.db.rollback()
+            logger.warning("Could not conditionally invalidate stored Twitch token")
+            return False
 
     async def get_valid_access_token(self) -> Optional[str]:
         """
@@ -199,10 +405,7 @@ class TwitchTokenService:
             async with aiohttp.ClientSession() as session:
                 async with session.post(self.TOKEN_URL, data=payload) as response:
                     if response.status != 200:
-                        error_text = await response.text()
-                        logger.error(
-                            f"Token refresh failed ({response.status}): {error_text}"
-                        )
+                        logger.error("Token refresh failed (%s)", response.status)
                         return None
 
                     token_data = await response.json()
@@ -226,9 +429,6 @@ class TwitchTokenService:
             encrypted_access_token = self.encryption.encrypt(new_access_token)
             global_settings.twitch_access_token = encrypted_access_token
             global_settings.twitch_token_expires_at = expires_at
-
-            # Update environment variable for backward compatibility
-            self.settings.TWITCH_OAUTH_TOKEN = new_access_token
 
             # Update refresh token if Twitch rotated it
             if new_refresh_token and new_refresh_token != refresh_token:
@@ -264,8 +464,8 @@ class TwitchTokenService:
 
             return new_access_token
 
-        except Exception as e:
-            logger.error(f"Error refreshing access token: {e}")
+        except Exception:
+            logger.error("Error refreshing access token")
             self.db.rollback()
             return None
 
@@ -303,9 +503,6 @@ class TwitchTokenService:
             global_settings.twitch_refresh_token = encrypted_refresh_token
             global_settings.twitch_access_token = encrypted_access_token
             global_settings.twitch_token_expires_at = expires_at
-
-            # Update environment variable for backward compatibility
-            self.settings.TWITCH_OAUTH_TOKEN = access_token
 
             self.db.commit()
 
@@ -415,6 +612,11 @@ class TwitchTokenService:
             not global_settings
             or not global_settings.twitch_access_token
             or global_settings.twitch_refresh_token
+        ):
+            return False
+        if (
+            global_settings.twitch_token_expires_at
+            == self.RECORDING_INVALIDATED_TOKEN_EXPIRY
         ):
             return False
 

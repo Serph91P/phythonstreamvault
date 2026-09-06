@@ -22,6 +22,7 @@ class StreamlinkConfigService:
         # Streamlink config directory (Docker: /app/config/streamlink)
         self.config_dir = Path("/app/config/streamlink")
         self.twitch_config_path = self.config_dir / "config.twitch"
+        self.twitch_anonymous_config_path = self.config_dir / "config.twitch-anonymous"
 
         # Ensure config directory exists (must be writable volume mount in Docker)
         if not self.config_dir.exists():
@@ -136,6 +137,19 @@ class StreamlinkConfigService:
 
             with open(self.twitch_config_path, "w", encoding="utf-8") as f:
                 f.write(config_content)
+
+            anonymous_config_path = getattr(
+                self,
+                "twitch_anonymous_config_path",
+                self.twitch_config_path.with_name("config.twitch-anonymous"),
+            )
+            anonymous_config_content = config_content.replace(
+                f"twitch-supported-codecs={supported_codecs}",
+                "twitch-supported-codecs=h264",
+                1,
+            )
+            with open(anonymous_config_path, "w", encoding="utf-8") as f:
+                f.write(anonymous_config_content)
 
             logger.info(
                 f"✅ Streamlink Twitch config generated: {self.twitch_config_path}"

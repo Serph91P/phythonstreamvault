@@ -127,6 +127,15 @@ jobs:
         working-directory: app/frontend
         run: npx playwright test
 
+      - name: Preserve frontend browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: frontend-browser-failures-${{ github.run_attempt }}
+          path: app/frontend/test-results/
+          if-no-files-found: ignore
+          retention-days: 3
+
   # ──────────────────────────────────────────────
   # Python Lint & Type Check
   # ──────────────────────────────────────────────

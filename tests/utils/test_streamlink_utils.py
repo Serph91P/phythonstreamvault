@@ -81,6 +81,46 @@ class TestStreamlinkUtils:
         assert "twitch.tv/teststreamer" in cmd
         # Config file contains timeout and retry settings
 
+    def test_anonymous_command_omits_auth_and_forces_h264(self):
+        cmd = get_streamlink_command(
+            streamer_name="teststreamer",
+            quality="720p",
+            output_path="/tmp/output.ts",
+            proxy_settings={"http": "http://proxy.example.com:8080"},
+            supported_codecs="av1,h265,h264",
+            oauth_token="must-not-appear",
+            anonymous=True,
+        )
+
+        assert "must-not-appear" not in " ".join(cmd)
+        assert not any("twitch-api-header" in argument for argument in cmd)
+        assert [
+            argument
+            for argument in cmd
+            if argument.startswith("--twitch-supported-codecs=")
+        ] == ["--twitch-supported-codecs=h264"]
+        assert "/app/config/streamlink/config.twitch-anonymous" in cmd
+        assert "--http-proxy=http://proxy.example.com:8080" in cmd
+        assert "twitch.tv/teststreamer" in cmd
+        assert "720p" in cmd
+        assert "/tmp/output.ts" in cmd
+
+    def test_authenticated_command_keeps_token_codecs_and_route(self):
+        cmd = get_streamlink_command(
+            streamer_name="teststreamer",
+            quality="best",
+            output_path="/tmp/output.ts",
+            proxy_settings={"https": "https://proxy.example.com:8443"},
+            supported_codecs="av1,h265,h264",
+            oauth_token="validated-token",
+            anonymous=False,
+        )
+
+        assert "--twitch-api-header=Authorization=OAuth validated-token" in cmd
+        assert "--twitch-supported-codecs=av1,h265,h264" in cmd
+        assert "--http-proxy=https://proxy.example.com:8443" in cmd
+        assert "/app/config/streamlink/config.twitch" in cmd
+
     def test_get_streamlink_vod_command(self):
         """Test VOD download command generation."""
         with patch.dict(os.environ, {"FFMPEG_PATH": "/usr/bin/ffmpeg"}):

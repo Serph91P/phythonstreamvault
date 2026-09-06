@@ -145,8 +145,8 @@ def install_immediate_exit_start(
         def __init__(self, db):
             pass
 
-        async def get_valid_access_token(self):
-            return None
+        async def resolve_recording_token(self):
+            return SimpleNamespace(token=None, source=None, stored_version=None)
 
     async def create_subprocess(*args, **kwargs):
         return failed_process
@@ -561,8 +561,8 @@ async def test_rotation_cancellation_tracks_or_reaps_created_replacement(
         def __init__(self, db):
             pass
 
-        async def get_valid_access_token(self):
-            return None
+        async def resolve_recording_token(self):
+            return SimpleNamespace(token=None, source=None, stored_version=None)
 
     async def create_subprocess(*args, **kwargs):
         child_created.set()
@@ -1110,8 +1110,8 @@ async def test_rotation_real_coordinator_hands_off_replacement(
         def __init__(self, db):
             pass
 
-        async def get_valid_access_token(self):
-            return None
+        async def resolve_recording_token(self):
+            return SimpleNamespace(token=None, source=None, stored_version=None)
 
     class FakeNotificationService:
         async def send_recording_notification(self, **kwargs):
@@ -1223,9 +1223,10 @@ async def test_recording_immediate_exit_releases_reserved_generation(
             recording_id=12,
         )
 
-    assert [name for name, _values in calls] == ["reserve", "activate", "release"]
+    assert [name for name, _values in calls] == ["reserve", "release"]
     assert calls[0][1]["channel_key"] == "stable-recording-channel"
     assert calls[0][1]["recording_id"] == 12
+    assert calls[0][1]["auth_key"] is None
     assert manager.active_processes == {}
 
 
@@ -1303,8 +1304,8 @@ async def test_recording_activation_failure_reaps_exact_child_before_durable_rel
         def __init__(self, db):
             pass
 
-        async def get_valid_access_token(self):
-            return None
+        async def resolve_recording_token(self):
+            return SimpleNamespace(token=None, source=None, stored_version=None)
 
     async def create_subprocess(*args, **kwargs):
         return process
@@ -1669,3 +1670,53 @@ async def test_recording_stop_revalidates_persisted_identity_before_sigkill(
     assert signaled == [(401, process_manager_module.signal.SIGTERM)]
     assert releases == []
     assert manager.active_processes["stream_7"] is process
+
+
+@pytest.mark.asyncio
+async def test_recording_stop_authorizes_unactivated_startup_child_locally() -> None:
+    process = FakeProcess()
+    process.pid = 701
+    manager = make_manager(process)
+    segment_info = make_segment_info()
+    segment_info.update(
+        {
+            "upstream_channel_key": "startup-channel",
+            "upstream_generation": 3,
+            "upstream_process_group_id": 701,
+            "upstream_process_start_fingerprint": "birth-701",
+            "upstream_activated": False,
+        }
+    )
+    manager.long_stream_processes["stream_7"] = segment_info
+    released = []
+
+    class Coordinator:
+        async def assert_stop_authorized(self, **_values):
+            raise AssertionError("unactivated reservation has no durable PID yet")
+
+        async def release(self, **values):
+            released.append(values)
+            return True
+
+    async def terminate_process_group(*_args, **_kwargs):
+        process.returncode = -15
+        process.release.set()
+        return True
+
+    async def finalize(_segment_info):
+        return None
+
+    manager.upstream_coordinator = Coordinator()
+    manager._terminate_process_group = terminate_process_group
+    manager._finalize_segmented_recording = finalize
+
+    assert await manager.terminate_process("stream_7") is True
+    assert manager.active_processes == {}
+    assert manager.long_stream_processes == {}
+    assert released == [
+        {
+            "channel_key": "startup-channel",
+            "generation": 3,
+            "reason": "recording_stopped",
+        }
+    ]

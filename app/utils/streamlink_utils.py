@@ -215,6 +215,7 @@ def get_streamlink_command(
     log_path: Optional[str] = None,
     supported_codecs: Optional[str] = None,
     oauth_token: Optional[str] = None,
+    anonymous: bool = False,
 ) -> List[str]:
     """
     Generate a Streamlink command for recording a stream.
@@ -222,11 +223,8 @@ def get_streamlink_command(
     This creates a robust Streamlink command following the approach used in lsdvr (TypeScript),
     with all parameters tuned for maximum stability and quality.
 
-    OAuth Token Handling:
-    - Config file (/app/config/streamlink/config.twitch) contains baseline token
-    - Per-recording token (oauth_token parameter) ALWAYS overrides config
-    - TwitchTokenService auto-refreshes token before EVERY recording start
-    - This prevents race conditions where stream starts with expired token
+    Authentication stays process-local. Explicit anonymous mode uses a separate
+    credential-free config and forces H.264.
 
     Args:
         streamer_name: The streamer's username
@@ -237,8 +235,8 @@ def get_streamlink_command(
         log_path: Custom path for streamlink logs (if None, will use default location)
         supported_codecs: Comma-separated list of codecs (e.g. "h264,h265") - Streamlink 8.0.0+
         oauth_token: Twitch OAuth token (auto-refreshed by TwitchTokenService).
-                    If provided, overrides config.twitch token.
-                    Enables: H.265/AV1 codecs, 1440p quality, ad-free (Turbo)
+                     Enables: H.265/AV1 codecs, 1440p quality, ad-free (Turbo)
+        anonymous: Omit authentication and force H.264.
 
     Returns:
         List of command arguments for streamlink
@@ -255,7 +253,9 @@ def get_streamlink_command(
     cmd = [
         "streamlink",
         "--config",
-        "/app/config/streamlink/config.twitch",
+        "/app/config/streamlink/config.twitch-anonymous"
+        if anonymous
+        else "/app/config/streamlink/config.twitch",
         f"twitch.tv/{streamer_name}",
         quality,
         "-o",
@@ -267,17 +267,17 @@ def get_streamlink_command(
     # - --twitch-api-header (OAuth token - auto-refreshed before recording)
     # - --http-proxy / --https-proxy (proxy settings from database)
 
-    # Only add codec support if explicitly requested (overrides config.twitch)
-    if supported_codecs and supported_codecs.strip():
+    effective_codecs = "h264" if anonymous else supported_codecs
+    if effective_codecs and effective_codecs.strip():
         # Use single argument with = for consistency (though codecs have no spaces)
-        cmd.append(f"--twitch-supported-codecs={supported_codecs.strip()}")
-        logger.debug(f"🎨 Overriding codec preference: {supported_codecs}")
+        cmd.append(f"--twitch-supported-codecs={effective_codecs.strip()}")
+        logger.debug(f"🎨 Overriding codec preference: {effective_codecs}")
 
     # CRITICAL: Always use per-recording OAuth token if provided
     # This ensures the token is fresh
     # (TwitchTokenService auto-refreshes before each recording)
     # Per-recording tokens override config.twitch to prevent stale tokens
-    if oauth_token and oauth_token.strip():
+    if not anonymous and oauth_token and oauth_token.strip():
         # Use single argument with = to prevent Streamlink from
         # parsing it as multiple args
         # CORRECT:   --twitch-api-header=Authorization=OAuth token
@@ -286,7 +286,7 @@ def get_streamlink_command(
         cmd.append(f"--twitch-api-header={token_header}")
         logger.debug("🔑 Using auto-refreshed OAuth token")
         logger.debug("   Enables: H.265/AV1, 1440p, ad-free (Turbo)")
-    else:
+    elif not anonymous:
         logger.warning("⚠️ No OAuth token - limited to 1080p H.264, ads may appear")
 
     # Add process-specific proxy settings if provided.

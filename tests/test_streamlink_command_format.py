@@ -441,8 +441,8 @@ def test_recording_new_child_selects_pool_or_stored_proxy(
         def __init__(self, _db):
             pass
 
-        async def get_valid_access_token(self):
-            return None
+        async def resolve_recording_token(self):
+            return SimpleNamespace(token=None, source=None, stored_version=None)
 
     class NotificationService:
         async def send_recording_notification(self, **_kwargs):
@@ -739,6 +739,35 @@ def test_generated_config_replaces_legacy_credentials_with_static_options(
     assert "fixture-current" not in config
     assert "fixture-fallback" not in config
     assert "fixture-value" not in config
+
+
+def test_generated_anonymous_config_cannot_inherit_static_authentication(
+    tmp_path: Path,
+):
+    with patch("pathlib.Path.exists", return_value=True):
+        from app.services.system.streamlink_config_service import (
+            StreamlinkConfigService,
+        )
+
+    service = StreamlinkConfigService.__new__(StreamlinkConfigService)
+    service.config_dir = tmp_path
+    service.twitch_config_path = tmp_path / "config.twitch"
+    anonymous_path = tmp_path / "config.twitch-anonymous"
+    anonymous_path.write_text(
+        "twitch-api-header=Authorization=OAuth stale-secret\n"
+        "twitch-supported-codecs=av1,h265,h264\n"
+    )
+
+    assert service.generate_twitch_config(oauth_token="current-secret")
+
+    config = anonymous_path.read_text()
+    assert not any(
+        line.startswith("twitch-api-header=") for line in config.splitlines()
+    )
+    assert "stale-secret" not in config
+    assert "current-secret" not in config
+    assert "twitch-supported-codecs=h264" in config
+    assert "retry-streams=10" in config
 
 
 def test_no_space_in_critical_arguments():

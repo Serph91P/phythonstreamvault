@@ -39,7 +39,11 @@ from app.utils.streamlink_utils import get_streamlink_command
 from app.services.recording.exceptions import ProcessError
 from app.models import Stream
 from app.utils import async_file
-from app.utils.security import get_streamlink_command_secret_values
+from app.utils.security import (
+    get_streamlink_command_secret_values,
+    sanitize_streamlink_output,
+)
+from app.services.recording.recording_auth_policy import is_twitch_auth_rejection
 from app.config.constants import ASYNC_DELAYS
 from app.services.twitch_upstream_coordinator import (
     AUTHENTICATED_TWITCH_ACCOUNT,
@@ -47,6 +51,7 @@ from app.services.twitch_upstream_coordinator import (
 )
 
 logger = logging.getLogger("streamvault")
+_UNRESOLVED_RECORDING_TOKEN = object()
 
 # ProcessMonitor integration temporarily disabled for stability
 process_monitor = None
@@ -64,6 +69,8 @@ class ProcessManager:
 
     # Constants for segment file patterns (must match RecordingLifecycleManager)
     SEGMENT_PART_IDENTIFIER = "_part"
+    AUTH_STARTUP_FALLBACK_WINDOW_SECONDS = 5.0
+    AUTH_STARTUP_POLL_SECONDS = 0.1
 
     # Singleton instance tracking
     _instance: Optional["ProcessManager"] = None
@@ -157,6 +164,79 @@ class ProcessManager:
         if contexts is not None:
             contexts.pop(process, None)
 
+    async def _resolve_recording_token(self):
+        from app.database import SessionLocal
+        from app.services.system.twitch_token_service import TwitchTokenService
+
+        try:
+            with SessionLocal() as db:
+                return await TwitchTokenService(db).resolve_recording_token()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "Failed to resolve Twitch authentication (%s)", type(e).__name__
+            )
+            return None
+
+    @staticmethod
+    def _segment_has_recording_data(segment_path: str) -> bool:
+        try:
+            path = Path(segment_path)
+            return path.exists() and path.stat().st_size > 0
+        except OSError:
+            return True
+
+    async def _wait_for_auth_startup(self, process, segment_path: str) -> None:
+        await asyncio.sleep(ASYNC_DELAYS.PROCESS_START_GRACE)
+        deadline = (
+            asyncio.get_running_loop().time()
+            + self.AUTH_STARTUP_FALLBACK_WINDOW_SECONDS
+        )
+        while process.returncode is None and not self._segment_has_recording_data(
+            segment_path
+        ):
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(self.AUTH_STARTUP_POLL_SECONDS, remaining))
+
+    async def _replace_startup_reservation_with_anonymous(
+        self, segment_info: Dict
+    ) -> None:
+        channel_key = segment_info["upstream_channel_key"]
+        generation = segment_info["upstream_generation"]
+        release_task = asyncio.create_task(
+            self.upstream_coordinator.release(
+                channel_key=channel_key,
+                generation=generation,
+                reason="recording_auth_fallback",
+            )
+        )
+        try:
+            released = await asyncio.shield(release_task)
+        except asyncio.CancelledError:
+            await release_task
+            raise
+        if not released:
+            raise ProcessError("Authenticated recording reservation was fenced")
+
+        reserve_task = asyncio.create_task(
+            self.upstream_coordinator.reserve(
+                channel_key=channel_key,
+                auth_key=None,
+                purpose="RECORDING",
+                recording_id=segment_info.get("recording_id"),
+            )
+        )
+        try:
+            reservation = await asyncio.shield(reserve_task)
+        except asyncio.CancelledError:
+            reservation = await reserve_task
+            segment_info["upstream_generation"] = reservation.generation
+            raise
+        segment_info["upstream_generation"] = reservation.generation
+
     def _track_segment_completion(self, process) -> asyncio.Task:
         tasks = getattr(self, "_segment_completion_tasks", None)
         if tasks is None:
@@ -198,12 +278,17 @@ class ProcessManager:
         """
         reservation = None
         try:
+            initial_token_resolution = await self._resolve_recording_token()
             streamer = getattr(stream, "streamer", None)
             channel_key = getattr(streamer, "twitch_id", None)
             if channel_key:
                 reservation = await self.upstream_coordinator.reserve(
                     channel_key=channel_key,
-                    auth_key=AUTHENTICATED_TWITCH_ACCOUNT,
+                    auth_key=(
+                        AUTHENTICATED_TWITCH_ACCOUNT
+                        if getattr(initial_token_resolution, "token", None)
+                        else None
+                    ),
                     purpose="RECOVERY"
                     if recovery_generation is not None
                     else "RECORDING",
@@ -214,13 +299,20 @@ class ProcessManager:
             segment_info = await self._initialize_segmented_recording(
                 stream, output_path, quality, recording_id, resume_segments_dir
             )
+            segment_info["auth_fallback_to_anonymous"] = not bool(
+                getattr(initial_token_resolution, "token", None)
+            )
             if reservation:
                 segment_info["upstream_channel_key"] = reservation.channel_key
                 segment_info["upstream_generation"] = reservation.generation
 
             # Start the first segment
             process = await self._start_segment(
-                stream, segment_info["current_segment_path"], quality, segment_info
+                stream,
+                segment_info["current_segment_path"],
+                quality,
+                segment_info,
+                token_resolution=initial_token_resolution,
             )
 
             if process:
@@ -396,7 +488,16 @@ class ProcessManager:
         return segment_info
 
     async def _start_segment(
-        self, stream: Stream, segment_path: str, quality: str, segment_info: Dict
+        self,
+        stream: Stream,
+        segment_path: str,
+        quality: str,
+        segment_info: Dict,
+        token_resolution=_UNRESOLVED_RECORDING_TOKEN,
+        _monitor_handoff: bool = False,
+        _handoff_owner=None,
+        _proxy_settings=_UNRESOLVED_RECORDING_TOKEN,
+        _supported_codecs=_UNRESOLVED_RECORDING_TOKEN,
     ) -> Optional[asyncio.subprocess.Process]:
         """Start recording a single segment"""
         try:
@@ -444,7 +545,8 @@ class ProcessManager:
 
                 # Check if proxy system is enabled
                 if (
-                    recording_settings
+                    not _monitor_handoff
+                    and recording_settings
                     and hasattr(recording_settings, "enable_proxy")
                     and recording_settings.enable_proxy
                 ):
@@ -489,33 +591,41 @@ class ProcessManager:
                     logger.info(
                         "ℹ️ Proxy system disabled - checking stored proxy settings"
                     )
-                    use_stored_proxy = True
+                    use_stored_proxy = not _monitor_handoff
 
             # Get codec preferences (H.265/AV1 support - Streamlink 8.0.0+)
             # Priority: Streamer-specific > Global default
             supported_codecs = None
-            oauth_token = None  # Will be set to fresh token if available
+            oauth_token = None
 
             from app.models import GlobalSettings, StreamerRecordingSettings
             from app.services.system.twitch_token_service import TwitchTokenService
 
             with SessionLocal() as db:
-                # === STEP 1: Get fresh OAuth token (auto-refresh if needed) ===
-                try:
-                    token_service = TwitchTokenService(db)
-                    oauth_token = await token_service.get_valid_access_token()
-
-                    if oauth_token:
-                        logger.info(
-                            f"🔑 Using auto-refreshed OAuth token for {streamer_name}"
+                if not segment_info.get("auth_fallback_to_anonymous"):
+                    try:
+                        if token_resolution is _UNRESOLVED_RECORDING_TOKEN:
+                            token_service = TwitchTokenService(db)
+                            token_resolution = (
+                                await token_service.resolve_recording_token()
+                            )
+                        oauth_token = getattr(token_resolution, "token", None)
+                        if oauth_token:
+                            logger.info(
+                                "Using live-validated Twitch authentication for %s",
+                                streamer_name,
+                            )
+                        else:
+                            logger.info(
+                                "Using anonymous H.264 recording for %s",
+                                streamer_name,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to resolve Twitch authentication (%s)",
+                            type(e).__name__,
                         )
-                    else:
-                        logger.debug(
-                            "ℹ️ No OAuth token available - H.265/1440p quality unavailable"
-                        )
-                except Exception as e:
-                    logger.warning("Failed to get OAuth token (%s)", type(e).__name__)
-                    oauth_token = None
+                        oauth_token = None
 
                 global_settings = db.query(GlobalSettings).first()
                 if use_stored_proxy and global_settings:
@@ -547,6 +657,11 @@ class ProcessManager:
                             f"🎨 Using global codec preference: {supported_codecs}"
                         )
 
+            if _proxy_settings is not _UNRESOLVED_RECORDING_TOKEN:
+                proxy_settings = _proxy_settings
+            if _supported_codecs is not _UNRESOLVED_RECORDING_TOKEN:
+                supported_codecs = _supported_codecs
+
             # NOTE: Proxy connectivity is now handled by ProxyHealthService
             # The health check system continuously monitors proxy status and only
             # returns healthy proxies. No need for manual connectivity check here.
@@ -558,6 +673,13 @@ class ProcessManager:
             # Generate streamlink command for this segment
             # Credentials and proxy selection stay process-local on the CLI.
             # Codec CLI parameters override the static config for this streamer.
+            anonymous = oauth_token is None
+            if anonymous and not _monitor_handoff:
+                logger.warning(
+                    "TWITCH_AUTH_FALLBACK_TO_H264 reason=%s source=%s attempt=1",
+                    getattr(token_resolution, "reason", "credential_unavailable"),
+                    getattr(token_resolution, "source", None) or "unknown",
+                )
             cmd = get_streamlink_command(
                 streamer_name=streamer_name,
                 quality=quality,
@@ -565,6 +687,7 @@ class ProcessManager:
                 proxy_settings=proxy_settings,  # Per-recording proxy override (from health check)
                 supported_codecs=supported_codecs,  # Per-streamer codec preference (overrides global)
                 oauth_token=oauth_token,  # Auto-refreshed OAuth token (overrides config)
+                anonymous=anonymous,
             )
 
             logger.info(
@@ -617,32 +740,78 @@ class ProcessManager:
                 streamer_logger.info(f"Segment: {segment_info['segment_count']}")
                 streamer_logger.info("=" * 80)
 
-            # Start the process
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
-            self._remember_streamlink_output_secrets(process, cmd)
-
-            # Publish ownership before any cancellable post-creation work.
             process_id = f"stream_{stream.id}"
-            self.active_processes[process_id] = process
-
             rotation_generation = segment_info.get("upstream_rotation_generation")
             activation_required = (
                 segment_info.get("upstream_channel_key")
                 and rotation_generation != segment_info["upstream_generation"]
             )
-            if activation_required:
-                identity_task = asyncio.create_task(
-                    self.upstream_coordinator.inspect_process_identity(process.pid)
-                )
-                try:
-                    process_identity = await asyncio.shield(identity_task)
-                except asyncio.CancelledError:
-                    process_identity = await identity_task
+            process_identity = None
+            fallback_attempted = False
+            fallback_owner = _handoff_owner
+
+            while True:
+                if fallback_owner is not None:
+                    try:
+                        async with self.lock:
+                            if (
+                                self.active_processes.get(process_id)
+                                is not fallback_owner
+                                or self.long_stream_processes.get(process_id)
+                                is not segment_info
+                            ):
+                                raise ProcessError("Recording stopped during fallback")
+                            process = await asyncio.create_subprocess_exec(
+                                *cmd,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                                start_new_session=True,
+                            )
+                            self._remember_streamlink_output_secrets(process, cmd)
+                            self.active_processes[process_id] = process
+                    except BaseException:
+                        async with self.lock:
+                            if self.active_processes.get(process_id) is fallback_owner:
+                                del self.active_processes[process_id]
+                            if (
+                                self.long_stream_processes.get(process_id)
+                                is segment_info
+                            ):
+                                del self.long_stream_processes[process_id]
+                        raise
+                    fallback_owner = None
+                else:
+                    process = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        start_new_session=True,
+                    )
+                    self._remember_streamlink_output_secrets(process, cmd)
+
+                    # Publish ownership before any cancellable post-creation work.
+                    self.active_processes[process_id] = process
+
+                if activation_required:
+                    identity_task = asyncio.create_task(
+                        self.upstream_coordinator.inspect_process_identity(process.pid)
+                    )
+                    try:
+                        process_identity = await asyncio.shield(identity_task)
+                    except asyncio.CancelledError:
+                        process_identity = await identity_task
+                        segment_info["upstream_process_group_id"] = (
+                            process_identity.process_group_id
+                        )
+                        segment_info["upstream_process_started_at"] = (
+                            process_identity.started_at
+                        )
+                        segment_info["upstream_process_start_fingerprint"] = (
+                            process_identity.fingerprint
+                        )
+                        segment_info["upstream_activated"] = False
+                        raise
+
                     segment_info["upstream_process_group_id"] = (
                         process_identity.process_group_id
                     )
@@ -653,18 +822,137 @@ class ProcessManager:
                         process_identity.fingerprint
                     )
                     segment_info["upstream_activated"] = False
-                    raise
 
-                segment_info["upstream_process_group_id"] = (
-                    process_identity.process_group_id
+                if anonymous:
+                    await asyncio.sleep(ASYNC_DELAYS.PROCESS_START_GRACE)
+                else:
+                    await self._wait_for_auth_startup(process, segment_path)
+                if process.returncode is None:
+                    if not anonymous and not self._segment_has_recording_data(
+                        segment_path
+                    ):
+                        # The completion monitor owns no-byte auth failures that
+                        # arrive after this bounded startup observation.
+                        segment_info["auth_startup_handoff"] = {
+                            "process": process,
+                            "stream": stream,
+                            "quality": quality,
+                            "stored_version": getattr(
+                                token_resolution, "stored_version", None
+                            ),
+                            "source": getattr(token_resolution, "source", None),
+                            "proxy_settings": proxy_settings,
+                            "supported_codecs": supported_codecs,
+                        }
+                    break
+
+                stdout, stderr = await process.communicate()
+                known_secrets = self._get_streamlink_output_secrets(process)
+                safe_output = "\n".join(
+                    (
+                        sanitize_streamlink_output(stdout, known_secrets),
+                        sanitize_streamlink_output(stderr, known_secrets),
+                    )
                 )
-                segment_info["upstream_process_started_at"] = (
-                    process_identity.started_at
+                logger.error(
+                    "PROCESS_FAILED_IMMEDIATELY: stream=%s exit_code=%s",
+                    stream.id,
+                    process.returncode,
                 )
-                segment_info["upstream_process_start_fingerprint"] = (
-                    process_identity.fingerprint
+                logger.error("Streamlink exited during recording startup")
+
+                if self.logging_service:
+                    self.logging_service.log_streamlink_output(
+                        streamer_name,
+                        stdout,
+                        stderr,
+                        process.returncode,
+                        known_secrets=known_secrets,
+                    )
+                    streamer_logger = logging.getLogger(f"streamlink.{streamer_name}")
+                    try:
+                        streamer_logger.error(
+                            "PROCESS FAILED IMMEDIATELY (exit code: %s)",
+                            process.returncode,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Could not write to streamlink log file (%s)",
+                            type(e).__name__,
+                        )
+
+                self._release_streamlink_output_secrets(process)
+                if (
+                    segment_info.get("auth_startup_handoff", {}).get("process")
+                    is process
+                ):
+                    segment_info.pop("auth_startup_handoff", None)
+                segment_has_data = self._segment_has_recording_data(segment_path)
+
+                should_fallback = (
+                    not anonymous
+                    and not fallback_attempted
+                    and not segment_has_data
+                    and is_twitch_auth_rejection(safe_output)
                 )
-                segment_info["upstream_activated"] = False
+                if should_fallback:
+                    fallback_attempted = True
+                    fallback_owner = process
+                    anonymous = True
+                    oauth_token = None
+                    segment_info["auth_fallback_to_anonymous"] = True
+                    stored_version = getattr(token_resolution, "stored_version", None)
+                    if stored_version is not None:
+                        try:
+                            with SessionLocal() as db:
+                                TwitchTokenService(db).invalidate_recording_token(
+                                    stored_version
+                                )
+                        except Exception:
+                            logger.warning(
+                                "Could not invalidate runtime-rejected Twitch token"
+                            )
+                    if activation_required:
+                        try:
+                            await self._replace_startup_reservation_with_anonymous(
+                                segment_info
+                            )
+                        except BaseException:
+                            async with self.lock:
+                                if self.active_processes.get(process_id) is process:
+                                    del self.active_processes[process_id]
+                                if (
+                                    self.long_stream_processes.get(process_id)
+                                    is segment_info
+                                ):
+                                    del self.long_stream_processes[process_id]
+                            raise
+                    logger.warning(
+                        "TWITCH_AUTH_FALLBACK_TO_H264 "
+                        "reason=streamlink_auth_rejection source=%s attempt=2",
+                        getattr(token_resolution, "source", None) or "unknown",
+                    )
+                    cmd = get_streamlink_command(
+                        streamer_name=streamer_name,
+                        quality=quality,
+                        output_path=segment_path,
+                        proxy_settings=proxy_settings,
+                        supported_codecs=supported_codecs,
+                        oauth_token=None,
+                        anonymous=True,
+                    )
+                    continue
+
+                async with self.lock:
+                    if self.active_processes.get(process_id) is process:
+                        del self.active_processes[process_id]
+                async with self.lock:
+                    if self.long_stream_processes.get(process_id) is segment_info:
+                        del self.long_stream_processes[process_id]
+                raise ProcessError("Streamlink process failed immediately")
+
+            if activation_required:
+                assert process_identity is not None
                 activation_task = asyncio.create_task(
                     self.upstream_coordinator.activate(
                         channel_key=segment_info["upstream_channel_key"],
@@ -705,51 +993,30 @@ class ProcessManager:
                 )
                 segment_info["upstream_activated"] = True
 
-            # Add immediate check to see if process started successfully
-            await asyncio.sleep(ASYNC_DELAYS.PROCESS_START_GRACE)
-            if process.returncode is not None:
-                # Process already ended, capture output
-                stdout, stderr = await process.communicate()
-                known_secrets = self._get_streamlink_output_secrets(process)
-                async with self.lock:
-                    if self.active_processes.get(process_id) is process:
-                        del self.active_processes[process_id]
-                    if self.long_stream_processes.get(process_id) is segment_info:
-                        del self.long_stream_processes[process_id]
-                logger.error(
-                    f"🎬 PROCESS_FAILED_IMMEDIATELY: PID would be {process.pid}, exit code {process.returncode}"
-                )
-                logger.error("Streamlink exited during recording startup")
-
-                # Log to structured logging service
-                if self.logging_service:
-                    self.logging_service.log_streamlink_output(
-                        streamer_name,
-                        stdout,
-                        stderr,
-                        process.returncode,
-                        known_secrets=known_secrets,
+            # A monitor-owned retry replaces the process for this segment rather
+            # than adding another segment or completion monitor.
+            if _monitor_handoff:
+                for segment in reversed(segment_info["total_segments"]):
+                    if segment["path"] == segment_path:
+                        segment["process_pid"] = process.pid
+                        break
+                else:
+                    segment_info["total_segments"].append(
+                        {
+                            "path": segment_path,
+                            "start_time": datetime.now(),
+                            "process_pid": process.pid,
+                        }
                     )
-                    streamer_logger = logging.getLogger(f"streamlink.{streamer_name}")
-                    try:
-                        streamer_logger.error(
-                            f"PROCESS FAILED IMMEDIATELY (exit code: {process.returncode})"
-                        )
-                    except Exception as e:
-                        logger.warning(f"Could not write to streamlink log file: {e}")
-
-                self._release_streamlink_output_secrets(process)
-                raise ProcessError("Streamlink process failed immediately")
-
-            # Add segment to the list
-            segment_info["total_segments"].append(
-                {
-                    "path": segment_path,
-                    "start_time": datetime.now(),
-                    "process_pid": process.pid,
-                }
-            )
-            self._track_segment_completion(process)
+            else:
+                segment_info["total_segments"].append(
+                    {
+                        "path": segment_path,
+                        "start_time": datetime.now(),
+                        "process_pid": process.pid,
+                    }
+                )
+                self._track_segment_completion(process)
 
             # Register process with ProcessMonitor - temporarily disabled
             # if process_monitor and ProcessType:
@@ -770,6 +1037,9 @@ class ProcessManager:
             logger.info(
                 f"Started segment recording for stream {stream.id} with PID {process.pid}"
             )
+
+            if _monitor_handoff:
+                return process
 
             # Send Apprise notification for recording_started (NEW)
             try:
@@ -1184,6 +1454,84 @@ class ProcessManager:
                     process.returncode,
                     known_secrets=known_secrets,
                 )
+
+            startup_handoff = (
+                segment_info.get("auth_startup_handoff") if segment_info else None
+            )
+            should_retry_anonymously = (
+                startup_handoff is not None
+                and startup_handoff["process"] is process
+                and process.returncode is not None
+                and not self._segment_has_recording_data(
+                    segment_info["current_segment_path"]
+                )
+                and is_twitch_auth_rejection(
+                    "\n".join(
+                        (
+                            sanitize_streamlink_output(stdout, known_secrets),
+                            sanitize_streamlink_output(stderr, known_secrets),
+                        )
+                    )
+                )
+            )
+
+            if should_retry_anonymously:
+                rotation_locks = getattr(self, "rotation_locks", None)
+                if rotation_locks is None:
+                    rotation_locks = self.rotation_locks = {}
+                rotation_lock = rotation_locks.setdefault(process_id, asyncio.Lock())
+
+                async with rotation_lock:
+                    async with self.lock:
+                        if (
+                            self.active_processes.get(process_id) is not process
+                            or self.long_stream_processes.get(process_id)
+                            is not segment_info
+                        ):
+                            return process.returncode or 0
+                    segment_info.pop("auth_startup_handoff", None)
+                    segment_info["auth_fallback_to_anonymous"] = True
+                    stored_version = startup_handoff["stored_version"]
+                    if stored_version is not None:
+                        try:
+                            from app.database import SessionLocal
+                            from app.services.system.twitch_token_service import (
+                                TwitchTokenService,
+                            )
+
+                            with SessionLocal() as db:
+                                TwitchTokenService(db).invalidate_recording_token(
+                                    stored_version
+                                )
+                        except Exception:
+                            logger.warning(
+                                "Could not invalidate runtime-rejected Twitch token"
+                            )
+                    if segment_info.get("upstream_channel_key"):
+                        await self._replace_startup_reservation_with_anonymous(
+                            segment_info
+                        )
+                    self._release_streamlink_output_secrets(process)
+                    logger.warning(
+                        "TWITCH_AUTH_FALLBACK_TO_H264 "
+                        "reason=streamlink_auth_rejection source=%s attempt=2",
+                        startup_handoff["source"] or "unknown",
+                    )
+                    replacement = await self._start_segment(
+                        startup_handoff["stream"],
+                        segment_info["current_segment_path"],
+                        startup_handoff["quality"],
+                        segment_info,
+                        token_resolution=None,
+                        _monitor_handoff=True,
+                        _handoff_owner=process,
+                        _proxy_settings=startup_handoff["proxy_settings"],
+                        _supported_codecs=startup_handoff["supported_codecs"],
+                    )
+                if replacement is None:
+                    raise ProcessError("Anonymous recording replacement did not start")
+                # The replacement's completion needs the same rotation lock.
+                return await self.monitor_process(replacement)
 
             # Handle segmented vs normal recording completion
             if segment_info:
@@ -1817,18 +2165,28 @@ class ProcessManager:
             process = self.active_processes[process_id]
             segment_info = self.long_stream_processes.get(process_id)
             if segment_info and segment_info.get("upstream_channel_key"):
-                try:
-                    await self.upstream_coordinator.assert_stop_authorized(
-                        channel_key=segment_info["upstream_channel_key"],
-                        generation=segment_info["upstream_generation"],
-                        process_pid=process.pid,
-                        process_group_id=segment_info["upstream_process_group_id"],
-                        process_start_fingerprint=segment_info[
-                            "upstream_process_start_fingerprint"
-                        ],
+                if segment_info.get("upstream_activated", True):
+                    try:
+                        await self.upstream_coordinator.assert_stop_authorized(
+                            channel_key=segment_info["upstream_channel_key"],
+                            generation=segment_info["upstream_generation"],
+                            process_pid=process.pid,
+                            process_group_id=segment_info["upstream_process_group_id"],
+                            process_start_fingerprint=segment_info[
+                                "upstream_process_start_fingerprint"
+                            ],
+                        )
+                    except PermissionError:
+                        logger.warning("Refusing stale stop for process %s", process_id)
+                        return False
+                elif not (
+                    segment_info.get("upstream_process_group_id")
+                    and segment_info.get("upstream_process_start_fingerprint")
+                ):
+                    logger.warning(
+                        "Refusing stop before process identity is available for %s",
+                        process_id,
                     )
-                except PermissionError:
-                    logger.warning("Refusing stale stop for process %s", process_id)
                     return False
 
             self.active_processes.pop(process_id)
